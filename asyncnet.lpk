@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <Package Version="4">
+    <PathDelim Value="\"/>
+    <Name Value="AsyncNet"/>
+    <Type Value="RunAndDesignTime"/>
+    <CompilerOptions>
+      <Version Value="11"/>
+      <PathDelim Value="\"/>
+      <SearchPaths>
+        <OtherUnitFiles Value="src"/>
+        <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)\"/>
+      </SearchPaths>
+    </CompilerOptions>
+    <Files Count="7">
+      <Item1>
+        <Filename Value="src\asyncnet.compatibility.pas"/>
+        <UnitName Value="stax.internal.tcp"/>
+      </Item1>
+      <Item2>
+        <Filename Value="src\asyncnet.sockets.pas"/>
+        <UnitName Value="stax.asynctcp"/>
+      </Item2>
+      <Item3>
+        <Filename Value="src\asyncnet.netdb.pas"/>
+        <UnitName Value="asyncnet.netdb"/>
+      </Item3>
+      <Item4>
+        <Filename Value="src\asyncnet.resolve.pas"/>
+        <UnitName Value="asyncnet.resolve"/>
+      </Item4>
+      <Item5>
+        <Filename Value="src\asyncnet.sslbase.pas"/>
+        <UnitName Value="asyncnet.sslbase"/>
+      </Item5>
+      <Item6>
+        <Filename Value="src\asyncnet.sslsockets.pas"/>
+        <UnitName Value="asyncnet.sslsockets"/>
+      </Item6>
+      <Item7>
+        <Filename Value="src\asyncnet.ssockets.pas"/>
+        <UnitName Value="asyncnet.ssockets"/>
+      </Item7>
+    </Files>
+    <RequiredPkgs Count="2">
+      <Item1>
+        <PackageName Value="StaxPKG"/>
+      </Item1>
+      <Item2>
+        <PackageName Value="FCL"/>
+      </Item2>
+    </RequiredPkgs>
+    <UsageOptions>
+      <UnitPath Value="$(PkgOutDir)"/>
+    </UsageOptions>
+    <PublishOptions>
+      <Version Value="2"/>
+      <UseFileFilters Value="True"/>
+    </PublishOptions>
+  </Package>
+</CONFIG>

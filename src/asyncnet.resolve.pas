@@ -1,16 +1,7 @@
 {$MODE OBJFPC}
 {$H+}
-Unit resolve;
+Unit asyncnet.resolve;
 
-{$ifndef win32}
-// Here till BSD supports the netbsd unit.
-// MvdV: NetBSD unit? Where?
-{$ifdef Unix}
-// Undefine this to use the C library resolve routines.
-// Don't use under win32, netdb does not work on Win32 (yet) !!
-{$define usenetdb}
-{$endif Unix}
-{$endif}
 { --------------------------------------------------------------------
   Unit for internet domain calls.
   Copyright (C) 2003  Michael Van Canneyt
@@ -34,7 +25,7 @@ Unit resolve;
 interface
 
 uses
-  Sockets,Classes,UriParser;
+  sockets,Classes,UriParser;
 
 Type
   THostAddr = in_addr;		
@@ -193,11 +184,7 @@ Implementation
     Include system dependent stuff.
   ---------------------------------------------------------------------}
 
-{$ifdef usenetdb}
-uses netdb;
-{$else}
-{$i resolve.inc}
-{$endif}
+uses asyncnet.netdb;
 
 { ---------------------------------------------------------------------
   TResolver
@@ -313,7 +300,6 @@ begin
   Result:=AddressLookup(StrToHostAddr(S));
 end;
 
-{$ifdef usenetdb}
 Function THostResolver.NameLookup (Const S : String) : Boolean;
 
 Var
@@ -361,72 +347,6 @@ begin
   FAliases.CommaText:=PH^.Aliases;
 end;
 
-{$else}
-
-Function THostResolver.NameLookup (Const S : String) : Boolean;
-
-Var
-  FHostEntry : PHostEntry;
-
-begin
-  Result:=Inherited NameLookup(S);
-  If Result then
-    begin
-    FHostEntry:=GetHostByName(pchar(FName));
-    Result:=FHostEntry<>Nil;
-    If Result then
-      SaveHostEntry(FHostEntry)
-    else
-      begin
-      FLastError:=GetDNSError;
-      CheckOperation(SErrHostByName);
-      end;
-    end;
-end;
-
-Procedure THostResolver.SaveHostEntry(Entry : Pointer);
-
-Var
-  P : Pointer;
-  I,Count : Integer;
-
-begin
-  With PHostEntry(Entry)^ do
-    begin
-    FName:=StrPas(H_Name);
-    FAddressCount:=0;
-    While H_Addr[FAddressCount]<>Nil do
-      Inc(FAddressCount);
-    If FAddressCount>0 then
-      begin
-      GetMem(FAddresses,FAddressCount*SizeOf(THostAddr));
-      For I:=0 to FAddressCount-1 do
-        FAddresses[I]:=NetToHost(PHostAddr(H_Addr[I])^);
-      FHostAddress:=FAddresses[0];
-      end;
-    SaveAliases(H_Aliases);
-    end;
-end;
-
-Function THostResolver.AddressLookup (Const Address: THostAddr) : Boolean;
-
-Var
-  FHostEntry : PHostEntry;
-
-begin
-  ClearData;
-  FHostEntry:=GetHostByAddr(Pchar(@Address),SizeOf(Address),AF_INET);
-  Result:=FHostEntry<>Nil;
-  If Result then
-    SaveHostEntry(FHostEntry)
-  else
-    begin
-    FLastError:=GetDNSError;
-    CheckOperation(SErrHostByAddr);
-    end;
-end;
-{$endif}
-
 Function THostResolver.GetNetAddress (Index : Integer) : THostAddr;
 
 begin
@@ -444,7 +364,6 @@ end;
     TNetResolver
   ---------------------------------------------------------------------}
 
-{$ifdef usenetdb}
 Function TNetResolver.AddressLookup (Const Address: TNetAddr) : boolean;
 
 Var
@@ -484,64 +403,6 @@ begin
   FAliases.CommaText:=PN^.Aliases;
 end;
 
-{$else}
-Function TNetResolver.NameLookup (Const S : String) : Boolean;
-
-Var
-  FNetEntry : PNetEntry;
-
-begin
-  Result:=Inherited NameLookup(S);
-  If Result then
-    begin
-    FNetEntry:=GetNetByName(pchar(S));
-    Result:=FNetEntry<>Nil;
-    If Result then
-      SaveNetEntry(FNetEntry)
-    else
-      begin
-      FLastError:=GetDNSError;
-      Checkoperation(SErrNetByName);
-      end;
-    end;
-end;
-
-Procedure TNetResolver.SaveNetEntry(Entry : Pointer);
-
-begin
-  With PNetEntry(Entry)^ do
-    begin
-    FName:=StrPas(N_Name);
-    FAddrType:=N_addrtype;
-    FNetAddress:=NetToHost(TNetAddr(N_net));
-    SaveAliases(N_Aliases);
-    end;
-end;
-
-Function TNetResolver.AddressLookup (Const Address: TNetAddr) : boolean;
-
-Var
-  FNetEntry : PNetEntry;
-
-begin
-  ClearData;
-{$ifndef win32}
-  FNetEntry:=GetNetByAddr(Longint(HostToNet(Address)),AF_INET);
-{$else}
-  FNetEntry:=Nil;
-{$endif}
-  Result:=FNetEntry<>Nil;
-  If Result then
-    SaveNetEntry(FNetEntry)
-  else
-    begin
-    FLastError:=GetDNSError;
-    CheckOperation(SErrNetByName);
-    end;
-end;
-
-{$endif}
-
 Function TNetResolver.AddressLookup(Const S : String) : Boolean;
 
 begin
@@ -580,8 +441,6 @@ begin
   Result:=NameLookup(S,'');
 end;
 
-{$ifdef usenetdb}
-
 Function TServiceResolver.NameLookup (Const S,Proto : String) : Boolean;
 
 Var
@@ -618,67 +477,6 @@ begin
   FProtocol:=PE^.Protocol;
   FAliases.CommaText:=PE^.Aliases;
 end;
-
-{$else}
-
-Function TServiceResolver.NameLookup (Const S,Proto : String) : Boolean;
-
-Var
-  FServiceEntry : PServEntry;
-
-begin
-  ClearData;
-  FName:=S;
-  FProtocol:=Proto;
-  If (proto='') then
-    FServiceEntry:=GetServByName(pchar(S),Nil)
-  else
-    FServiceEntry:=GetServByName(pchar(S),PChar(FProtocol));
-  Result:=FServiceEntry<>Nil;
-  If Result then
-    SaveServiceEntry(FServiceEntry)
-  else
-    begin
-    FLastError:=GetDNSError;
-    CheckOperation(SErrServByName);
-    end;
-end;
-
-Function TServiceResolver.PortLookup (APort: Longint; Proto : String) : Boolean;
-
-Var
-  FServiceEntry : PServEntry;
-
-begin
-  ClearData;
-  APort:=ShortHostToNet(APort);
-  FProtoCol:=Proto;
-  If (Proto='') then
-    FServiceEntry:=GetServByPort(APort,Nil)
-  else
-    FServiceEntry:=GetServByPort(APort,pchar(Proto));
-  Result:=FServiceEntry<>Nil;
-  If Result then
-    SaveServiceEntry(FServiceEntry)
-  else
-    begin
-    FLastError:=GetDNSError;
-    CheckOperation(SErrServByPort);
-    end;
-end;
-
-Procedure TServiceResolver.SaveServiceEntry(Entry : Pointer);
-
-begin
-  With PServEntry(Entry)^ do
-   begin
-   FName:=strpas(s_name);
-   FPort:=ShortHostToNet(S_port);
-   FProtocol:=strpas(s_proto);
-   SaveAliases(S_aliases);
-   end;
-end;
-{$endif}
 
 Procedure TServiceResolver.ClearData;
 
@@ -804,24 +602,5 @@ begin
   U.Bookmark := FBookmark;
   Result:=EncodeUri(U);
 end;
-
-
-{$ifdef usenetdb}
-Procedure InitResolve;
-
-begin
-end;
-
-Procedure FinalResolve;
-
-begin
-end;
-{$endif}
-
-Initialization
-  InitResolve;
-
-Finalization
-  FinalResolve;
 
 end.

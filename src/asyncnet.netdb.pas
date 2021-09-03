@@ -15,7 +15,7 @@
 {$mode objfpc}
 {$h+}
 
-unit netdb;
+unit asyncnet.netdb;
 {
   WARNING
   This unit hardly does any error checking. For example, stringfromlabel
@@ -23,9 +23,6 @@ unit netdb;
   order to crash  your program.  So if you really want to depend on this
   in critical programs then you'd better fix a lot of code in here.
   Otherwise, it appears to work pretty well.
-
-  When compiling this unit with the FPC_USE_LIBC defined, the warning above
-  can be ignored, since the libc implementation should be robust.
 }
 
 Interface
@@ -52,10 +49,6 @@ Uses Sockets;
  {$DEFINE UNIX_ETC}
 {$ENDIF UNIX}
 
-{$if defined(android)}
-  {$define FPC_USE_LIBC}
-{$endif}
-
 Type
   THostAddr = in_addr;		// historical aliases for these.
   THostAddr6= Tin6_addr;
@@ -63,7 +56,6 @@ Type
 
 Const
   MaxResolveAddr = 10;
-{$ifndef FPC_USE_LIBC}
   DNSPort        = 53;
   SServicesFile  = 'services';
   SHostsFile     = 'hosts';
@@ -110,7 +102,6 @@ Const
 
 var
   EtcPath: string;
-{$endif FPC_USE_LIBC}
 
 Type
   TDNSRcode = (rcNoError, rcFormatError,rcServFail,rcNXDomain,
@@ -158,8 +149,6 @@ Type
     Entry : THostEntry;
     Next : PHostListEntry;
   end;
-
-{$ifndef FPC_USE_LIBC}
 
 Type 
   TPayLoad  = Array[0..511] of Byte;
@@ -233,7 +222,6 @@ Function GetDNSServers : Integer;
 {$else}
 Function GetDNSServers(FN : String) : Integer;
 {$endif android}
-{$endif FPC_USE_LIBC}
 
 // Addresses are returned in the net byte order
 Function ResolveName(HostName : String; Var Addresses : Array of THostAddr) : Integer;
@@ -271,7 +259,6 @@ Function GetServiceByPort(Port : Word;Const Proto : String; Var E : TServiceEntr
 Function GetProtocolByName(ProtoName: String;  Var H : TProtocolEntry) : boolean;
 Function GetProtocolByNumber(proto: Integer;  Var H : TProtocolEntry) : boolean;
 
-{$ifndef FPC_USE_LIBC}
 Function ProcessHosts(FileName : String) : PHostListEntry;
 Function FreeHostsList(var List : PHostListEntry) : Integer;
 Procedure HostsListToArray(var List : PHostListEntry; Var Hosts : THostEntryArray; FreeList : Boolean);
@@ -350,27 +337,19 @@ function DNSRRGetSRV(const RR: TRRNameData; const pl: TPayload;
 function DNSRRGetSRV(const RR: TRRNameData; const pl: TPayloadTCP;
   out srv: TDNSRR_SRV): Boolean;
 
-
-{$endif FPC_USE_LIBC}
-
 Implementation
 
-uses 
-{$ifdef FPC_USE_LIBC}
-   cNetDB,
-{$endif FPC_USE_LIBC}
-   BaseUnix,
+uses
+   asyncnet.compatibility,
+   AsyncNet.sockets,
    sysutils;
 
-{$ifndef FPC_USE_LIBC}
 type
   TTCPSocketResult = (srTimeout,srPartial,srSocketClose,srOK);
 
 var
   DefaultDomainListArr : array of string;
   NDots: Integer;
-
-   
 
 { ---------------------------------------------------------------------
     Some Parsing routines
@@ -1642,16 +1621,16 @@ begin
   fpsendto(sock,@qry,qrylen+12,0,@SA,SizeOf(SA));
   // Wait for answer.
   RTO:=TimeOutS*1000+TimeOutMS;
-  fpFD_ZERO(ReadFDS);
-  fpFD_Set(sock,readfds);
-  if fpSelect(Sock+1,@readfds,Nil,Nil,RTO)<=0 then
+  FD_ZERO(ReadFDS);
+  FD_Set(sock,readfds);
+  if Select(Sock+1,@readfds,Nil,Nil,@RTO)<=0 then
     begin
-    fpclose(Sock);
+    CloseSocket(Sock);
     exit;
     end;
   AL:=SizeOf(SA);
   L:=fprecvfrom(Sock,@ans,SizeOf(Ans),0,@SA,@AL);
-  fpclose(Sock);
+  CloseSocket(Sock);
 
   if L < 12 then exit;
   // Return Payload length.
@@ -1664,7 +1643,7 @@ begin
   //end;
 end;
 
-function FetchDNSResponse(sock: Cint; out len: ssize_t;
+function FetchDNSResponse(sock: TSocket; out len: ssize_t;
   out Ans: TQueryDataLengthTCP): TTCPSocketResult;
 var
   respsize: Word;
@@ -1699,7 +1678,7 @@ function QueryTCP(Resolver: Integer; var Qry: TQueryDataLength;
   var Ans: TQueryDataLengthTCP; QryLen: Integer; var AnsLen: Integer): Boolean;
 Var
   SA : TInetSockAddr;
-  Sock : cint;
+  Sock : TSocket;
   L: ssize_t;
   RTO : Longint;
   ReadFDS : TFDSet;
@@ -1742,7 +1721,7 @@ begin
   count := fpsend(Sock,@Qry,sendsize,0);
   if count < sendsize then
   begin
-    fpclose(Sock);
+    CloseSocket(Sock);
     exit;
   end;
 
@@ -1750,14 +1729,14 @@ begin
   fpshutdown(Sock, SHUT_WR);
 
   RTO := 5000;
-  fpFD_ZERO(ReadFDS);
-  fpFD_Set(sock,ReadFDS);
+  FD_ZERO(ReadFDS);
+  FD_Set(sock,ReadFDS);
 
   // select to wait for data
-  if fpSelect(sock+1, @ReadFDS, Nil, Nil,  RTO)<=0 then
+  if Select(sock+1, @ReadFDS, Nil, Nil, @RTO)<=0 then
   begin
     // timed out, nothing received.
-    fpclose(sock);
+    CloseSocket(sock);
     exit;
   end;
 
@@ -1773,7 +1752,7 @@ begin
     resp := FetchDNSResponse(Sock, L, Ans);
   end;
 
-  fpclose(sock);
+  CloseSocket(sock);
   if resp <> srOK then exit;
 
   // Set AnsLen to be the size of the payload minus the header.
@@ -2631,270 +2610,6 @@ Procedure DoneResolver;
 begin
   FreeHostsList(HostsList);
 end;
-
-{$else FPC_USE_LIBC}
-
-{ ---------------------------------------------------------------------
-    Implementation based on libc
-  ---------------------------------------------------------------------}
-
-Function ResolveName(const HostName : String; Addresses: pointer; MaxAddresses, Family: integer) : Integer;
-var
-  h: TAddrInfo;
-  res, ai: PAddrInfo;
-begin
-  Result:=-1;
-  if MaxAddresses = 0 then
-    exit;
-  FillChar(h, SizeOf(h), 0);
-  h.ai_family:=Family;
-  h.ai_socktype:=SOCK_STREAM;
-  res:=nil;
-  if (getaddrinfo(PChar(HostName), nil, @h, @res) <> 0) or (res = nil) then
-    exit;
-  Result:=0;
-  ai:=res;
-  repeat
-    if ai^.ai_family = Family then begin
-      if Family = AF_INET then begin
-        Move(PInetSockAddr(ai^.ai_addr)^.sin_addr, Addresses^, SizeOf(TInAddr));
-        Inc(PInAddr(Addresses));
-      end
-      else begin
-        Move(PInetSockAddr6(ai^.ai_addr)^.sin6_addr, Addresses^, SizeOf(TIn6Addr));
-        Inc(PIn6Addr(Addresses));
-      end;
-      Inc(Result);
-    end;
-    ai:=ai^.ai_next;
-  until (ai = nil) or (Result >= MaxAddresses);
-  freeaddrinfo(res);
-end;
-
-Function ResolveName(HostName : String; Var Addresses : Array of THostAddr) : Integer;
-begin
-  Result:=ResolveName(HostName, @Addresses, Length(Addresses), AF_INET);
-end;
-
-Function ResolveName6(HostName : String; Var Addresses : Array of THostAddr6) : Integer;
-begin
-  Result:=ResolveName(HostName, @Addresses, Length(Addresses), AF_INET6);
-end;
-
-Function ResolveAddress(Addr : pointer; AddrLen: integer; Var Names : Array of String) : Integer;
-var
-  n: ansistring;
-begin
-  Result:=-1;
-  if Length(Names) = 0 then
-    exit;
-  n:='';
-  SetLength(n, NI_MAXHOST);
-  if getnameinfo(Addr, AddrLen, @n[1], Length(n), nil, 0, 0) = 0 then begin
-    Names[Low(Names)]:=PAnsiChar(n);
-    Result:=1;
-  end;
-end;
-
-Function ResolveAddress(HostAddr : THostAddr; Var Addresses : Array of String) : Integer;
-var
-  a: TInetSockAddr;
-begin
-  FillChar(a, SizeOf(a), 0);
-  a.sin_family:=AF_INET;
-  a.sin_addr.s_addr:=htonl(HostAddr.s_addr);
-  Result:=ResolveAddress(@a, SizeOf(a), Addresses);
-end;
-
-Function ResolveAddress6(HostAddr: THostAddr6; var Addresses: Array of string) : Integer;
-var
-  a: TInetSockAddr6;
-begin
-  FillChar(a, SizeOf(a), 0);
-  a.sin6_family:=AF_INET6;
-  Move(HostAddr, a.sin6_addr, SizeOf(TInetSockAddr6));
-  Result:=ResolveAddress(@a, SizeOf(a), Addresses);
-end;
-
-Function ResolveHostByName(HostName : String; Var H : THostEntry) : Boolean;
-Var
-  Address : Array[1..1] of THostAddr;
-begin
-  Result:=ResolveName(HostName,Address) > 0;
-  if Result then begin
-    H.Name:=HostName;
-    H.Addr:=Address[1];
-    H.aliases:='';
-  end;
-end;
-
-Function ResolveHostByName6(Hostname : String; Var H : THostEntry6) : Boolean;
-Var
-  Address : Array[1..1] of THostAddr6;
-begin
-  Result:=ResolveName6(HostName,Address) > 0;
-  if Result then begin
-    H.Name:=HostName;
-    H.Addr:=Address[1];
-    H.aliases:='';
-  end;
-end;
-
-Function ResolveHostByAddr(HostAddr : THostAddr; Var H : THostEntry) : Boolean;
-Var
-  Names : Array[1..MaxResolveAddr] of String;
-  I,L : Integer;
-begin
-  L:=ResolveAddress(HostAddr,Names);
-  Result:=(L>0);
-  If Result then
-    begin
-    H.Name:=Names[1];
-    H.Addr:=HostAddr;
-    H.Aliases:='';
-    If (L>1) then
-      For I:=2 to L do
-        If (I=2) then
-          H.Aliases:=Names[i]
-        else
-          H.Aliases:=H.Aliases+','+Names[i];
-    end;
-end;
-
-Function ResolveHostByAddr6(HostAddr : THostAddr6; Var H : THostEntry6) : Boolean;
-Var
-  Names : Array[1..MaxResolveAddr] of String;
-  I,L : Integer;
-begin
-  L:=ResolveAddress6(HostAddr,Names);
-  Result:=(L>0);
-  If Result then
-    begin
-    H.Name:=Names[1];
-    H.Addr:=HostAddr;
-    H.Aliases:='';
-    If (L>1) then
-      For I:=2 to L do
-        If (I=2) then
-          H.Aliases:=Names[i]
-        else
-          H.Aliases:=H.Aliases+','+Names[i];
-    end;
-end;
-
-Function GetHostByName(HostName: String;  Var H : THostEntry) : boolean;
-begin
-  Result:=False;
-end;
-
-Function GetHostByAddr(Addr: THostAddr;  Var H : THostEntry) : boolean;
-begin
-  Result:=False;
-end;
-
-function PPCharToString(list: PPChar): string;
-begin
-  Result:='';
-  if list = nil then
-    exit;
-  while list^ <> nil do begin
-    if Length(Result) = 0 then
-      Result:=list^
-    else
-      Result:=Result + ',' + list^;
-    Inc(list);
-  end;
-end;
-
-Function GetNetworkByName(NetName: String; Var N : TNetworkEntry) : boolean;
-var
-  ne: PNetEnt;
-begin
-  ne:=getnetbyname(PAnsiChar(NetName));
-  Result:=ne <> nil;
-  if Result then begin
-    N.Name:=ne^.n_name;
-    N.Addr.s_addr:=ne^.n_net;
-    N.Aliases:=PPCharToString(ne^.n_aliases);
-  end;
-end;
-
-Function GetNetworkByAddr(Addr: THostAddr; Var N : TNetworkEntry) : boolean;
-var
-  ne: PNetEnt;
-begin
-  ne:=getnetbyaddr(htonl(Addr.s_addr), AF_INET);
-  Result:=ne <> nil;
-  if Result then begin
-    N.Name:=ne^.n_name;
-    N.Addr.s_addr:=ne^.n_net;
-    N.Aliases:=PPCharToString(ne^.n_aliases);
-  end;
-end;
-
-Function GetServiceByName(Const Name,Proto : String; Var E : TServiceEntry) : Boolean;
-var
-  se: PServEnt;
-begin
-  se:=getservbyname(PAnsiChar(Name), PAnsiChar(Proto));
-  Result:=se <> nil;
-  if Result then begin
-    E.Name:=se^.s_name;
-    E.Port:=NToHs(se^.s_port);
-    E.Protocol:=se^.s_proto;
-    E.Aliases:=PPCharToString(se^.s_aliases);
-  end;
-end;
-
-Function GetServiceByPort(Port : Word;Const Proto : String; Var E : TServiceEntry) : Boolean;
-var
-  se: PServEnt;
-begin
-  se:=getservbyport(htons(Port), PAnsiChar(Proto));
-  Result:=se <> nil;
-  if Result then begin
-    E.Name:=se^.s_name;
-    E.Port:=NToHs(se^.s_port);
-    E.Protocol:=se^.s_proto;
-    E.Aliases:=PPCharToString(se^.s_aliases);
-  end;
-end;
-
-Function GetProtocolByName(ProtoName: String;  Var H : TProtocolEntry) : boolean;
-var
-  pe: PProtoEnt;
-begin
-  pe:=getprotobyname(PAnsiChar(ProtoName));
-  Result:=pe <> nil;
-  if Result then begin
-    H.Name:=pe^.p_name;
-    H.Number:=pe^.p_proto;
-    h.Aliases:=PPCharToString(pe^.p_aliases);
-  end;
-end;
-
-Function GetProtocolByNumber(proto: Integer;  Var H : TProtocolEntry) : boolean;
-var
-  pe: PProtoEnt;
-begin
-  pe:=getprotobynumber(proto);
-  Result:=pe <> nil;
-  if Result then begin
-    H.Name:=pe^.p_name;
-    H.Number:=pe^.p_proto;
-    h.Aliases:=PPCharToString(pe^.p_aliases);
-  end;
-end;
-
-Procedure InitResolver; inline;
-begin
-end;
-
-Procedure DoneResolver; inline;
-begin
-end;
-
-{$endif FPC_USE_LIBC}
 
 { ---------------------------------------------------------------------
     Common routines

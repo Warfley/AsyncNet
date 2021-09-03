@@ -12,14 +12,14 @@
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 
  **********************************************************************}
-unit sslsockets;
+unit asyncnet.sslsockets;
 
 {$mode objfpc}{$H+}
 
 interface
 
 uses
-  Classes, SysUtils, sockets, ssockets, sslbase;
+  Classes, SysUtils, asyncnet.ssockets, asyncnet.sslbase;
 
 Const
   SUseCertData = 'use CertificateData instead';

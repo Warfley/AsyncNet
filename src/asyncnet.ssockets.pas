@@ -12,7 +12,7 @@
  **********************************************************************}
 {$MODE objfpc}{$H+}
 
-unit ssockets;
+unit asyncnet.ssockets;
 
 
 interface
