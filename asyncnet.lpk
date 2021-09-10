@@ -8,18 +8,18 @@
       <Version Value="11"/>
       <PathDelim Value="\"/>
       <SearchPaths>
-        <OtherUnitFiles Value="src"/>
-        <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)\"/>
+        <OtherUnitFiles Value="src;src\windows"/>
+        <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
       </SearchPaths>
     </CompilerOptions>
     <Files Count="7">
       <Item1>
         <Filename Value="src\asyncnet.compatibility.pas"/>
-        <UnitName Value="stax.internal.tcp"/>
+        <UnitName Value="asyncnet.compatibility"/>
       </Item1>
       <Item2>
         <Filename Value="src\asyncnet.sockets.pas"/>
-        <UnitName Value="stax.asynctcp"/>
+        <UnitName Value="asyncnet.sockets"/>
       </Item2>
       <Item3>
         <Filename Value="src\asyncnet.netdb.pas"/>

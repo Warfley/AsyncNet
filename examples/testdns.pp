@@ -17,7 +17,7 @@
 
 program testdns;
 
-uses netdb,Sockets;
+uses AsyncNet.netdb, Sockets, stax, stax.functional;
 
 Procedure DumpHostEntry(Const H : THostEntry);
 
@@ -55,17 +55,15 @@ begin
     Writeln('No entry for hostname ',N)
 end;
 
+procedure TestNetDB(AExecutor: TExecutor);
 Var
   I,l : INteger;
   Ans : Array [1..10] of THostAddr;
   H   : THostAddr;
   NAns : Array[1..10] of String;
-
-
-
 begin
   Writeln('Resolving name ');
-  l:=ResolveName('db.wisa.be',Ans);
+  l:=ResolveName('google.com',Ans);
   Writeln('Got : ',l,' answers');
   For I:=1 to l do
     Writeln(i:2,': ',hostAddrtostr(Ans[i]));
@@ -76,7 +74,20 @@ begin
   For I:=1 to l do
     Writeln(i:2,': ',NAns[i]);
   Writeln('ResolveHostByName:');
-  testname('malpertuus.wisa.be');
+  testname('maps.google.com');
   Writeln('ResolveHostByAddr:');
   testaddr('212.224.143.202');
+end;
+
+var
+  Exec: TExecutor;
+begin
+  Exec := TExecutor.Create;
+  try
+    Exec.RunAsync(AsyncProcedure(@TestNetDB));
+    Exec.Run;
+  finally
+    Exec.Free;
+  end;
+  ReadLn;
 end.

@@ -27,7 +27,7 @@ unit asyncnet.netdb;
 
 Interface
 
-Uses Sockets;
+Uses Sockets{$IfDef WINDOWS}, JwaIpTypes, JwaIpHlpApi, windows{$EndIf};
 
 {$IFDEF OS2}
 (* ETC directory location determined by environment variable ETC *)
@@ -220,7 +220,11 @@ Var
 {$ifdef android}
 Function GetDNSServers : Integer;
 {$else}
+{$ifdef WINDOWS}
+Function GetDNSServers : Integer;
+{$else}
 Function GetDNSServers(FN : String) : Integer;
+{$endif WINDOWS}
 {$endif android}
 
 // Addresses are returned in the net byte order
@@ -342,6 +346,7 @@ Implementation
 uses
    asyncnet.compatibility,
    AsyncNet.sockets,
+   stax,
    sysutils;
 
 type
@@ -665,6 +670,53 @@ end;
 
 {$else}
 
+{$ifdef WINDOWS}
+procedure AddDNS(const ADNS: IP_ADDRESS_STRING); inline;
+begin
+  SetLength(DNSServers, Length(DNSServers) + 1);
+  DNSServers[Length(DNSServers) - 1] := StrToNetAddr(PChar(@ADNS.S));
+end;
+
+function GetDNSServers: Integer;
+var
+  pFI: PFIXED_INFO;
+  pIPAddr: PIPAddrString;
+  OutLen: ULONG;
+begin
+  DNSServers := nil;
+  Result := 0;
+  OutLen := SizeOf(TFixedInfo);
+  GetMem(pFI, SizeOf(TFixedInfo));
+  try
+    if GetNetworkParams(pFI, OutLen) = ERROR_BUFFER_OVERFLOW then
+    begin
+      ReallocMem(pFI, OutLen);
+      if GetNetworkParams(pFI, OutLen) <> NO_ERROR then Exit;
+    end;
+    // If there is no network available there may be no DNS servers defined
+    if pFI^.DnsServerList.IpAddress.S[0] = #0 then Exit;
+    // Add first server
+    AddDNS(pFI^.DnsServerList.IpAddress);
+    // Add rest of servers
+    pIPAddr := pFI^.DnsServerList.Next;
+    while Assigned(pIPAddr) do
+    begin
+      AddDNS(pIPAddr^.IpAddress);
+      pIPAddr := pIPAddr^.Next;
+    end;
+  finally
+    FreeMem(pFI);
+  end;
+end;
+
+Procedure CheckResolveFile;
+begin
+  if CheckResolveFileAge then
+    GetDNSServers;
+end;
+
+{$else}
+
 Var
   ResolveFileAge  : Longint;
   ResolveFileName : String;
@@ -758,7 +810,8 @@ begin
       GetDnsServers(N);
     end;  
 end;
-
+    
+{$endif WINDOWS}
 {$endif android}
 
 { ---------------------------------------------------------------------
@@ -1591,12 +1644,14 @@ end;
 Function Query(Resolver : Integer; Var Qry,Ans : TQueryData; QryLen : Integer; Var AnsLen : Integer) : Boolean;
 
 Var
-  SA : TInetSockAddr;
+  DnsAddr: String;
   Sock,L : Longint;
-  Al,RTO : Longint;
-  ReadFDS : TFDSet;
-  
+  RTO : Longint;
+  Exec: TExecutable;
 begin
+  Exec := GetCurrentExecution;
+  if not Assigned(Exec) then
+    raise ENotAnExecutionException.Create('Can only be called from within an asynchronous execution');
   Result:=False;
   With Qry.h do
     begin
@@ -1609,28 +1664,25 @@ begin
     nscount:=0;
     arcount:=0;
     end;
-  Sock:=FpSocket(PF_INET,SOCK_DGRAM,0);
-  If Sock=-1 then 
-    exit;
-  With SA do
-    begin
-    sin_family:=AF_INET;
-    sin_port:=htons(DNSport);
-    sin_addr.s_addr:=cardinal(DNSServers[Resolver]); // dnsservers already in net order
+  Sock := fpsocket(AF_INET, SOCK_DGRAM, 0);
+  If SocketInvalid(Sock) then
+    Exit;
+  DnsAddr := NetAddrToStr(DNSServers[Resolver]);
+  try
+    try
+      Await(AsyncSendTo(Sock, DnsAddr, DNSPort, @Qry, QryLen + 12));
+      // Wait for answer.
+      RTO:=TimeOutS*1000+TimeOutMS;
+      L := specialize Await<TUDPReceiveFromResult>(AsyncReceiveFrom(sock, @Ans, SizeOf(Ans)), RTO).Size;
+    except
+      on E: EAwaitTimeoutException do
+        Exit;
+      on E: ESocketError do // sockert error -> just exit
+        Exit;
     end;
-  fpsendto(sock,@qry,qrylen+12,0,@SA,SizeOf(SA));
-  // Wait for answer.
-  RTO:=TimeOutS*1000+TimeOutMS;
-  FD_ZERO(ReadFDS);
-  FD_Set(sock,readfds);
-  if Select(Sock+1,@readfds,Nil,Nil,@RTO)<=0 then
-    begin
+  finally
     CloseSocket(Sock);
-    exit;
-    end;
-  AL:=SizeOf(SA);
-  L:=fprecvfrom(Sock,@ans,SizeOf(Ans),0,@SA,@AL);
-  CloseSocket(Sock);
+  end;
 
   if L < 12 then exit;
   // Return Payload length.
@@ -1641,37 +1693,6 @@ begin
     exit;
   Result:=True;
   //end;
-end;
-
-function FetchDNSResponse(sock: TSocket; out len: ssize_t;
-  out Ans: TQueryDataLengthTCP): TTCPSocketResult;
-var
-  respsize: Word;
-  L: ssize_t;
-
-begin
-  Result := srOK;
-  len := 0;
-
-  // peek into the socket buffer and see if a full message is waiting.
-  L := fprecv(sock, @Ans, SizeOf(Ans), MSG_PEEK);
-  if L = 0 then
-  begin
-    Result := srSocketClose;
-    exit;
-  end;
-  // The first two bytes of a DNS TCP payload is the number of octets in the
-  // response, excluding the two bytes of length. This lets us see if we've
-  // received the full response.
-  respsize := NToHs(Ans.length);
-  if (L < 2) or (L < (respsize + SizeOf(Ans.length))) then
-  begin
-    Result := srPartial;
-    exit;
-  end;
-
-  // The full DNS response is waiting in the buffer. Get it now.
-  len := fprecv(sock, @Ans, SizeOf(Ans), 0);
 end;
 
 function QueryTCP(Resolver: Integer; var Qry: TQueryDataLength;
@@ -1687,6 +1708,7 @@ Var
   respsize: Word;
   resp: TTCPSocketResult;
   tstart: QWord;
+  DNSAddr: String;
 
 begin
   tstart := GetTickCount64;
@@ -1702,61 +1724,40 @@ begin
     nscount:=0;
     arcount:=0;
   end;
+  DNSAddr := NetAddrToStr(DNSServers[Resolver]);
   Sock:=FpSocket(AF_INET,SOCK_STREAM,0);
-  If Sock=-1 then
+  If SocketInvalid(Sock) then
     exit;
-  With SA do
-  begin
-    sin_family:=AF_INET;
-    sin_port:=htons(DNSport);
-    sin_addr.s_addr:=cardinal(DNSServers[Resolver]); // octets already in net order
-  end;
-
-  // connect to the resolver
-  if (fpconnect(Sock, @SA, SizeOf(SA)) <> 0) then
-    exit;
-
-  // send the query to the resolver
-  sendsize := QryLen + SizeOf(Qry.hpl.h) + SizeOf(Qry.length);
-  count := fpsend(Sock,@Qry,sendsize,0);
-  if count < sendsize then
-  begin
+  try
+    try
+      // connect to the resolver
+      Await(AsyncConnect(Sock, DNSAddr, DNSPort));
+      // send the query to the resolver
+      sendsize := QryLen + SizeOf(Qry.hpl.h) + SizeOf(Qry.length);
+      Await(AsyncSend(Sock, @Query, sendsize));
+      // tell other side we're done writing.
+      fpshutdown(Sock, SHUT_WR);
+      // Timeout receive
+      RTO := 5000;
+      // read length with timeout
+      Ans.length := specialize Await<Word>(specialize AsyncReceive<Word>(Sock), RTO);
+      // Read all the bytes announced in Ans.Length
+      Await(AsyncReceive(Sock, @Ans.h, NToHs(Ans.length)));
+    except
+      // Prematurely closing connection
+      on E: EConnectionClosedException do
+        Exit;
+      // Timeout on receive
+      on E: EAwaitTimeoutException do
+        Exit;
+      // Other socket errors
+      on E: ESocketError do
+        Exit;
+    end;
+  finally
     CloseSocket(Sock);
-    exit;
   end;
 
-  // tell other side we're done writing.
-  fpshutdown(Sock, SHUT_WR);
-
-  RTO := 5000;
-  FD_ZERO(ReadFDS);
-  FD_Set(sock,ReadFDS);
-
-  // select to wait for data
-  if Select(sock+1, @ReadFDS, Nil, Nil, @RTO)<=0 then
-  begin
-    // timed out, nothing received.
-    CloseSocket(sock);
-    exit;
-  end;
-
-  // for partial responses, keep trying until all data received or the
-  // timeout period has elapsed. the timeout period includes the time
-  // spent waiting on select.
-  resp := FetchDNSResponse(Sock, L, Ans);
-  while (resp = srPartial) and ((GetTickCount64 - tstart) < RTO) do
-  begin
-    // need to sleep to avoid high cpu. 50ms means a 5 second timeout will
-    // make up to 100 calls to FetchDNSResponse.
-    Sleep(50);
-    resp := FetchDNSResponse(Sock, L, Ans);
-  end;
-
-  CloseSocket(sock);
-  if resp <> srOK then exit;
-
-  // Set AnsLen to be the size of the payload minus the header.
-  Anslen := L-SizeOf(Qry.hpl.h);
   // if the final check finds problems with the answer, we'll return false
   // but AnsLen being >=0 will let the caller know that the server did
   // respond, but either declined to answer or couldn't.
@@ -2576,6 +2577,9 @@ begin
   TimeOutS :=5;
   TimeOutMS:=0;
   CheckHostsFileAge:=False;
+  {$IfDef Windows}
+  GetDNSServers;
+{$Else}
 {$IFDEF UNIX_ETC}
   EtcPath := '/etc/';
 {$ELSE UNIX_ETC}
@@ -2601,8 +2605,8 @@ begin
 {$IFDEF OS2}
   else if FileExists(EtcPath + SResolveFile2) then
     GetDNsservers(EtcPath + SResolveFile2)
-{$ENDIF OS2}
-                                         ;
+{$ENDIF OS2};
+{$EndIf Windows}
 end;
 
 Procedure DoneResolver;
