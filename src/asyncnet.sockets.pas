@@ -198,6 +198,7 @@ type
 
 const
   SocketSleepingTime = 10;
+  MaxUDPPackageSize = 512;
 
 // Connection establishment
 function AsyncAccept(AServerSocket: TSocket): specialize TRVTask<TAcceptResult>; inline;
@@ -213,9 +214,9 @@ function AsyncReceiveStr(ASocket: Tsocket; ALength: SizeInt; AwaitFullData: Bool
 // UDP receiving
 function AsyncReceiveFrom(ASocket: TSocket; ABuffer: Pointer; ABufferSize: SizeInt): specialize TRVTask<TUDPReceiveFromResult>; inline; overload;
 generic function AsyncReceiveFrom<T>(ASocket: TSocket): specialize TRVTask<specialize TUDPReceiveResult<T>>; inline;
-// 1472 + header = IP MTU size
-generic function AsyncReceiveFromArray<T>(ASocket: TSocket; AMaxCount: SizeInt = 1472): specialize TRVTask<specialize TUDPReceiveResult<specialize TArray<T>>>; inline;
-function AsyncReceiveFromStr(ASocket: TSocket; AMaxLength: SizeInt = 1472): specialize TRVTask<specialize TUDPReceiveResult<String>>; inline;
+// 512 is generally considered the UDP size limit
+generic function AsyncReceiveFromArray<T>(ASocket: TSocket; AMaxCount: SizeInt = MaxUDPPackageSize): specialize TRVTask<specialize TUDPReceiveResult<specialize TArray<T>>>; inline;
+function AsyncReceiveFromStr(ASocket: TSocket; AMaxLength: SizeInt = MaxUDPPackageSize): specialize TRVTask<specialize TUDPReceiveResult<String>>; inline;
 
 // TCP sending
 function AsyncSend(ASocket: Tsocket; ABuffer: Pointer; ACount: SizeInt): TTask; overload; inline;
