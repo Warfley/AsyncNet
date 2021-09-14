@@ -1700,11 +1700,11 @@ function QueryTCP(Resolver: Integer; var Qry: TQueryDataLength;
 Var
   SA : TInetSockAddr;
   Sock : TSocket;
-  L: ssize_t;
+  L: SizeInt;
   RTO : Longint;
   ReadFDS : TFDSet;
   count: Integer;
-  sendsize: ssize_t;
+  sendsize: SizeInt;
   respsize: Word;
   resp: TTCPSocketResult;
   tstart: QWord;

@@ -419,22 +419,23 @@ end;
 
 procedure WaitForHandshake(ATask: TTask; ASocket: Tsocket); inline;
 var
-  success: LongInt;
-  fs: TFDSet;
-  timeout: TTimeVal;
+  success, err: LongInt;
+  // long enough for any kind of address
+  addr: array[0..31] of byte;
+  len: SizeInt;
 begin
-  fs := Default(TFDSet);
-  FD_ZERO(fs);
-  FD_SET(ASocket, fs);
-  timeout.tv_sec:=0;
-  timeout.tv_usec:=0;
   repeat
-    success := select(ASocket + 1, Nil, @fs, nil, @timeout);
-    if success = 0 then
-      ATask.Sleep(SocketSleepingTime)
-    else if success < 0 then
-      raise ESocketError.Create(socketerror, 'select');
-  until success = 1;
+    len := 32;
+    success := fpgetpeername(ASocket, @addr, @len);
+    if success < 0 then
+    begin
+      err := socketerror;
+      if err = ESockENOTCONN then
+        ATask.Sleep(SocketSleepingTime)
+      else
+        raise ESocketError.Create(err, 'getpeername');
+    end;
+  until success = 0;
 end;
 
 function WaitingRecvFrom(AExecution: TExecutable; ASocket: TSocket;
@@ -589,6 +590,7 @@ begin
   addr := @_addr;
   addrLen := @_addrLen;
   {$EndIf}
+  addrLen^ := SizeOf(sockaddr);
   dataLen := WaitingRecvFrom(Self, FSocket, @FResult.Data, SizeOf(T), 0, addr, addrLen);
   FResult.Port := ShortNetToHost(addr^.sin_port);
   FResult.Address := NetAddrToStr(addr^.sin_addr);
@@ -630,6 +632,7 @@ begin
   addrLen := @_addrLen;
   {$EndIf}
   SetLength(FResult.Data, FMaxLength);
+  addrLen^ := SizeOf(sockaddr);
   dataLen := WaitingRecvFrom(Self, FSocket, PChar(FResult.Data), FMaxLength, 0, addr, addrLen);
   SetLength(FResult.Data, dataLen);
   FResult.Port := ShortNetToHost(addr^.sin_port);
@@ -672,6 +675,7 @@ begin
   addrLen := @_addrLen;
   {$EndIf}
   SetLength(FResult.Data, FMaxCount);
+  addrLen^ := SizeOf(sockaddr);
   dataLen := WaitingRecvFrom(Self, FSocket, @FResult.Data[0], FMaxCount * SizeOf(T), 0, addr, addrLen);
   SetLength(FResult.Data, dataLen div SizeOf(T));
   FResult.Port := ShortNetToHost(addr^.sin_port);
@@ -713,6 +717,7 @@ begin
   addr := @_addr;
   addrLen := @_addrLen;
   {$EndIf}
+  addrLen^ := SizeOf(sockaddr);
   FResult.Size := WaitingRecvFrom(Self, FSocket, FBuffer, FBufferLen, 0, addr, addrLen);
   FResult.Port := ShortNetToHost(addr^.sin_port);
   FResult.Address := NetAddrToStr(addr^.sin_addr);
