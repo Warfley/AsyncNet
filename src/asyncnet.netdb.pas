@@ -14,20 +14,13 @@
  **********************************************************************}
 {$mode objfpc}
 {$h+}
+{$ModeSwitch arrayoperators}
 
 unit asyncnet.netdb;
-{
-  WARNING
-  This unit hardly does any error checking. For example, stringfromlabel
-  could easily be exploited by  someone sending malicious UDP packets in
-  order to crash  your program.  So if you really want to depend on this
-  in critical programs then you'd better fix a lot of code in here.
-  Otherwise, it appears to work pretty well.
-}
 
-Interface
+interface
 
-Uses Sockets{$IfDef WINDOWS}, JwaIpTypes, JwaIpHlpApi, windows{$EndIf};
+uses SysUtils, Classes, Generics.Collections, Sockets, stax;
 
 {$IFDEF OS2}
 (* ETC directory location determined by environment variable ETC *)
@@ -44,15 +37,8 @@ Uses Sockets{$IfDef WINDOWS}, JwaIpTypes, JwaIpHlpApi, windows{$EndIf};
  {$DEFINE SFN_VERSION}
 {$ENDIF WATCOM}
 
-{$IFDEF UNIX}
-(* ETC directory location hardcoded to /etc/ *)
- {$DEFINE UNIX_ETC}
-{$ENDIF UNIX}
-
-Type
-  THostAddr = in_addr;		// historical aliases for these.
-  THostAddr6= Tin6_addr;
-  TNetAddr  = THostAddr;	// but in net order.
+type
+  ENoSuchEntry = class(Exception);
 
 Const
   MaxResolveAddr = 10;
@@ -60,6 +46,10 @@ Const
   SServicesFile  = 'services';
   SHostsFile     = 'hosts';
   SNetworksFile  = 'networks';
+  {$IfDef WINDOWS}
+  SProtocolFile  = 'protocol';
+  SResolveFile   = 'resolv';
+  {$Else Windows}
 {$IFDEF SFN_VERSION}
   SProtocolFile  = 'protocol';
   SResolveFile   = 'resolv';
@@ -72,619 +62,412 @@ Const
   SProtocolFile  = 'protocols';
   SResolveFile   = 'resolv.conf';
 {$ENDIF SFN_VERSION}
+{$EndIf Windows}
 
-  MaxRecursion = 10;
   MaxIP4Mapped = 10;
 
-  { from http://www.iana.org/assignments/dns-parameters }
-  DNSQRY_A     = 1;                     // name to IP address
-  DNSQRY_AAAA  = 28;                    // name to IP6 address
-  DNSQRY_A6    = 38;                    // name to IP6 (new)
-  DNSQRY_PTR   = 12;                    // IP address to name
-  DNSQRY_MX    = 15;                    // name to MX
-  DNSQRY_TXT   = 16;                    // name to TXT
-  DNSQRY_CNAME = 5;
-  DNSQRY_SOA   = 6;
-  DNSQRY_NS    = 2;
-  DNSQRY_SRV   = 33;
+  DefaultDNSTimeout = 5000;
+  DefaultDNSAttempts = 3;
+  DefaultDNSRecursionDepth = 10;
 
-  // Flags 1
-  QF_QR     = $80;
-  QF_OPCODE = $78;
-  QF_AA     = $04;
-  QF_TC     = $02;  // Truncated.
-  QF_RD     = $01;
+type
+  TAddressType = (atIN4, atIN6);
+  TNetworkAddress = record
+    Address: String;
+    AddressType: TAddressType;
+  end;
+  TNetworkAddressArray = array of TNetworkAddress;
 
-  // Flags 2
-  QF_RA     = $80;
-  QF_Z      = $70;
-  QF_RCODE  = $0F;
-
-var
-  EtcPath: string;
-
-Type
-  TDNSRcode = (rcNoError, rcFormatError,rcServFail,rcNXDomain,
-    rcNotImpl,rcRefused,rcReserved,rcInvalid);
-  TDNSServerArray = Array of THostAddr;
   TServiceEntry = record
     Name     : String;
     Protocol : String;
     Port     : Word;
-    Aliases  : String;
+    Aliases  : array of String;
   end;
+  TServiceList = specialize TList<TServiceEntry>;
 
   THostEntry = record
     Name : String;
-    Addr : THostAddr;
-    Aliases : String;
+    Addr : TNetworkAddress;
+    Aliases : array of String;
   end;
-  PHostEntry = ^THostEntry;
-  THostEntryArray = Array of THostEntry;
-
-  THostEntry6 = record
-    Name : String;
-    Addr : THostAddr6;
-    Aliases : String;
-  end;
-  PHostEntry6 = ^THostEntry6;
-  THostEntry6Array = Array of THostEntry6;
+  THostMap = specialize TDictionary<String, THostEntry>;
 
   TNetworkEntry = Record
     Name : String;
-    Addr : TNetAddr;
-    Aliases : String;
+    Addr : TNetworkAddress;
+    Aliases : array of String;
   end;
-  PNetworkEntry = ^TNetworkEntry;
+  TNetworkMap = specialize TDictionary<String, TNetworkEntry>;
 
   TProtocolEntry = Record
     Name : String;
-    Number : integer;
-    Aliases : String;
+    Number : Integer;
+    Aliases : array of String;
   end;
-  PProtocolEntry = ^TProtocolEntry;
+  TProtocolMap = specialize TDictionary<String, TProtocolEntry>;
 
-  PHostListEntry = ^THostListEntry;
-  THostListEntry = Record
-    Entry : THostEntry;
-    Next : PHostListEntry;
-  end;
+  { TConfFileDB }
 
-Type
-  TPayLoad  = Array[0..511] of Byte;
-  TPayLoadTCP = Array[0 .. 65535] of Byte;
+  TConfFileDB = class
+  protected type
+    TTokenizedLine = array of String;
+  private
+    FFileName: String;
+    FLastRead: LongInt;
+    FLock: TRTLCriticalSection;
 
-  TDNSHeader = packed Record
-    id      : Array[0..1] of Byte;
-    flags1  : Byte;
-    flags2  : Byte;
-    qdcount : word;
-    ancount : word;
-    nscount : word;
-    arcount : word;
-  end;
+    function ParseLine(const ALine: String): TTokenizedLine;
+  protected 
+    procedure ParseEntry(const ALine: TTokenizedLine); virtual; abstract;
+    procedure Update; virtual;
+  public
+    constructor Create(const AFileName: String);
+    destructor Destroy; override;
 
-  TQueryData = packed Record
-    h: TDNSHeader;
-    Payload : TPayLoad;
+    procedure BeginAccess; inline;
+    procedure EndAccess; inline;
   end;
 
-  TQueryDataLength = packed record
-    length: Word;
-    hpl: TQueryData;
+  { TResolveDB }
+
+  TResolveDB = class(TConfFileDB)
+  private
+    class var Singleton: TResolveDB;
+
+    class constructor InitStatics;
+    class destructor CleanupStatics;
+  public
+    class function Instance: TResolveDB; static; inline;
+  public type
+    TResolveNames = array of String;
+  private
+    FDNSServers: TStringList;
+    FSearchDomains: TStringList;
+    FDNSTimeOut: Integer;
+    FAttempts: Integer;
+    // Number of labels required for a direct resolve
+    FLabelThreshold: Integer;
+
+    function CountLabels(const AName: String): SizeInt;
+  protected
+    procedure Update; override;
+    procedure ParseEntry(const ALine: TTokenizedLine); override;
+  public
+    constructor Create;
+    destructor Destroy; override;
+
+    function GenerateResolutionNames(const ADomain: String): TResolveNames;
+         
+    property DNSServers: TStringList read FDNSServers;
+    property SearchDomains: TStringList read FSearchDomains;
+    property DNSTimeOut: Integer read FDNSTimeOut;
+    property Attempts: Integer read FAttempts;
+    property LabelThreshold: Integer read FLabelThreshold;
+    property ResolutionNames[const ADomain: String]: TResolveNames read GenerateResolutionNames;
   end;
 
-  TQueryDataLengthTCP = packed Record
-    length: Word;
-    h: TDNSHeader;
-    Payload : TPayLoadTCP;
+  { TServiceDB }
+
+  TServiceDB = class(TConfFileDB)
+  private
+    class var Singleton: TServiceDB;
+
+    class constructor InitStatics;
+    class destructor CleanupStatics;
+  public
+    class function Instance: TServiceDB; static; inline;
+  public type
+    TServiceArray = array of TServiceEntry;
+  private
+    FServices: TServiceList;
+
+  protected
+    procedure Update; override;
+    procedure ParseEntry(const ALine: TTokenizedLine); override;
+  public
+    constructor Create;
+    destructor Destroy; override;
+
+    function TryFindServices(const NameOrAlias: String): TServiceArray; overload;
+    function TryFindService(APort: Word): TServiceArray; overload;
+
+  private
+    function GetService(const NameOrAlias: String): TServiceArray; inline;
+    function GetServiceByPort(APort: Word): TServiceArray; inline;
+  public
+    property Services: TServiceList read FServices;
+    property Service[const NameOrAlias: String]: TServiceArray read GetService; default;
+    property ServiceByPort[APort: Word]: TServiceArray read GetServiceByPort;
   end;
 
-  PRRData = ^TRRData;
-  TRRData = Packed record       // RR record
-    Atype    : Word;            // Answer type
-    AClass   : Word;
-    TTL      : Cardinal;
-    RDLength : Word;
+  { THostsDB }
+
+  THostsDB = class(TConfFileDB)
+  private
+    class var Singleton: THostsDB;
+
+    class constructor InitStatics;
+    class destructor CleanupStatics;
+  public
+    class function Instance: THostsDB; static; inline;
+  private
+    FHosts: THostMap;
+
+  protected
+    procedure Update; override;
+    procedure ParseEntry(const ALine: TTokenizedLine); override;
+  public
+    constructor Create;
+    destructor Destroy; override;
+
+    function TryFindHost(const NameOrAlias: String; out AEntry: THostEntry): Boolean; overload;
+    function TryFindHost(const HostAddress: TNetworkAddress; out AEntry: THostEntry): Boolean; overload;
+
+  private
+    function GetHost(const NameOrAlias: String): THostEntry; inline;
+    function GetHostByAddress(const HostAddress: TNetworkAddress): THostEntry; inline;
+    function GetHosts: THostMap.TValueCollection; inline;
+  public
+    property Hosts: THostMap.TValueCollection read GetHosts;
+    property Host[const NameOrAlias: String]: THostEntry read GetHost; default;
+    property HostByAddress[const HostAddress: TNetworkAddress]: THostEntry read GetHostByAddress;
   end;
 
-  TRRNameData = packed record
-    RRName   : ShortString;
-    RRMeta   : TRRData;
-    RDataSt  : Word;
+  { TNetworksDB }
+
+  TNetworksDB = class(TConfFileDB)
+  private
+    class var Singleton: TNetworksDB;
+
+    class constructor InitStatics;
+    class destructor CleanupStatics;
+  public
+    class function Instance: TNetworksDB; static; inline;
+  private
+    FNetworks: TNetworkMap;
+
+    function CompleteNetworkAddress(const Addr: String): String;
+  protected
+    procedure Update; override;
+    procedure ParseEntry(const ALine: TTokenizedLine); override;
+  public
+    constructor Create;
+    destructor Destroy; override;
+
+    function TryFindNetwork(const NameOrAlias: String; out AEntry: TNetworkEntry): Boolean; overload;
+    function TryFindNetwork(const NetworkAddress: TNetworkAddress; out AEntry: TNetworkEntry): Boolean; overload;
+
+  private
+    function GetNetwork(const NameOrAlias: String): TNetworkEntry; inline;
+    function GetNetworkByAddress(const NetworkAddress: TNetworkAddress): TNetworkEntry; inline;
+    function GetNetworks: TNetworkMap.TValueCollection; inline;
+  public
+    property Networks: TNetworkMap.TValueCollection read GetNetworks;
+    property Network[const NameOrAlias: String]: TNetworkEntry read GetNetwork; default;
+    property NetworkByAddress[const NetworkAddress: TNetworkAddress]: TNetworkEntry read GetNetworkByAddress;
   end;
-  TRRNameDataArray = array of TRRNameData;
 
-  TDNSDomainName = ShortString;
-  TDNSRR_SOA = packed record
-    mname, rname: TDNSDomainName;
-    serial,refresh,retry,expire,min: Cardinal;
+  { TProtocolDB }
+
+  TProtocolDB = class(TConfFileDB)
+  private
+    class var Singleton: TProtocolDB;
+
+    class constructor InitStatics;
+    class destructor CleanupStatics;
+  public
+    class function Instance: TProtocolDB; static; inline;
+  private
+    FProtocols: TProtocolMap;
+
+  protected
+    procedure Update; override;
+    procedure ParseEntry(const ALine: TTokenizedLine); override;
+  public
+    constructor Create;
+    destructor Destroy; override;
+
+    function TryFindProtocol(const NameOrAlias: String; out AEntry: TProtocolEntry): Boolean; overload;
+    function TryFindProtocol(Number: Integer; out AEntry: TProtocolEntry): Boolean; overload;
+
+  private
+    function GetProtocol(const NameOrAlias: String): TProtocolEntry; inline;
+    function GetProtocolByNumber(Number: Integer): TProtocolEntry; inline;
+    function GetProtocols: TProtocolMap.TValueCollection; inline;
+  public
+    property Protocols: TProtocolMap.TValueCollection read GetProtocols;
+    property Protocol[const NameOrAlias: String]: TProtocolEntry read GetProtocol; default;
+    property ProtocolByNumber[Number: Integer]: TProtocolEntry read GetProtocolByNumber;
   end;
-  TDNSRR_MX = packed record
-    preference: Word;
-    exchange: TDNSDomainName;
-  end;
-  TDNSRR_SRV = packed record
-    priority, weight, port: Word;
-    target: TDNSDomainName;
+
+  TDNSResolveResult = record
+    Address: TNetworkAddress;
+    TimeOut: QWord;
   end;
 
-Var
-  DNSServers            : TDNSServerArray;
-  DNSOptions            : String;
-  DefaultDomainList     : String;
-  CheckResolveFileAge   : Boolean;
-  CheckHostsFileAge     : Boolean;
-  TimeOutS,TimeOutMS    : Longint;
+  { TDNSResolveTask }
 
-{$ifdef android}
-Function GetDNSServers : Integer;
-{$else}
-{$ifdef WINDOWS}
-Function GetDNSServers : Integer;
-{$else}
-Function GetDNSServers(FN : String) : Integer;
-{$endif WINDOWS}
-{$endif android}
+  TDNSResolveTask = class(specialize TRVTask<TNetworkAddressArray>)
+  private
+    FHostName: String;
+    FDNSServers: TNetworkAddressArray;
+    FTimeOut: Integer;
+    FAttempts: Integer;
+    FUseIPv6: Boolean;
+    FRecursionDepth: Integer;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(const AHostName: String; const ADNSServers: TNetworkAddressArray;
+                       UseIPv6: Boolean = False; ATimeOut: Integer = DefaultDNSTimeout;
+                       AAttempts: Integer = DefaultAttempts;
+                       ARecursionDepth: Integer = DefaultDNSRecursionDepth);
+  end;
 
-// Addresses are returned in the net byte order
-Function ResolveName(HostName : String; Var Addresses : Array of THostAddr) : Integer;
-Function ResolveName6(HostName : String; Var Addresses : Array of THostAddr6) : Integer;
+// easy singleton access
+function ResolveDB: TResolveDB; inline;
+function ServiceDB: TServiceDB; inline;
+function HostsDB: THostsDB; inline;
+function NetworksDB: TNetworksDB; inline;
+function ProtocolDB: TProtocolDB; inline;
 
-// HostAddr is specified in the host byte order
-Function ResolveAddress(HostAddr : THostAddr; Var Addresses : Array of String) : Integer;
-Function ResolveAddress6(HostAddr: THostAddr6; var Addresses: Array of string) : Integer;
+// Address management
+function IN4Address(const Address: String): TNetworkAddress; inline;
+function IN6Address(const Address: String): TNetworkAddress; inline;
+function INAddr(const Address: String): TNetworkAddress; inline;
 
-function IN6_IS_ADDR_V4MAPPED(HostAddr: THostAddr6): boolean;
+function IN6Equal(const A, B: String): Boolean;
+operator =(const A, B: TNetworkAddress): Boolean; inline;
 
-// H.Addr is returned in the net byte order
-Function ResolveHostByName(HostName : String; Var H : THostEntry) : Boolean;
-// HostAddr is specified in the host byte order
-Function ResolveHostByAddr(HostAddr : THostAddr; Var H : THostEntry) : Boolean;
 
-Function ResolveHostByName6(Hostname : String; Var H : THostEntry6) : Boolean;
-Function ResolveHostByAddr6(HostAddr : THostAddr6; Var H : THostEntry6) : Boolean;
+function IN6_IS_ADDR_V4MAPPED(HostAddr: TIn6Addr): boolean;
+function IsIPv4Mapped(const IPv6Addr: String): Boolean; inline;
+implementation
+uses asyncnet.sockets {$IfDef WINDOWS}, JwaIpTypes, JwaIpHlpApi, windows{$EndIf};
 
-// H.Addr is returned in the host byte order
-Function GetHostByName(HostName: String;  Var H : THostEntry) : boolean;
-// Addr is specified in the host byte order
-Function GetHostByAddr(Addr: THostAddr;  Var H : THostEntry) : boolean;
-
-// N.Addr is returned in the net byte order
-Function GetNetworkByName(NetName: String; Var N : TNetworkEntry) : boolean;
-// Addr is specified in the host byte order
-Function GetNetworkByAddr(Addr: THostAddr; Var N : TNetworkEntry) : boolean;
-
-// E.Port is returned in the host byte order
-Function GetServiceByName(Const Name,Proto : String; Var E : TServiceEntry) : Boolean;
-// Port is specified in the host byte order
-Function GetServiceByPort(Port : Word;Const Proto : String; Var E : TServiceEntry) : Boolean;
-
-Function GetProtocolByName(ProtoName: String;  Var H : TProtocolEntry) : boolean;
-Function GetProtocolByNumber(proto: Integer;  Var H : TProtocolEntry) : boolean;
-
-Function ProcessHosts(FileName : String) : PHostListEntry;
-Function FreeHostsList(var List : PHostListEntry) : Integer;
-Procedure HostsListToArray(var List : PHostListEntry; Var Hosts : THostEntryArray; FreeList : Boolean);
-
-Procedure CheckResolveFile;
-Function Query(Resolver : Integer; Var Qry,Ans : TQueryData; QryLen : Integer; Var AnsLen : Integer) : Boolean;
-function QueryTCP(Resolver : Integer; Var Qry: TQueryDataLength;
-  var Ans: TQueryDataLengthTCP; QryLen : Integer; Var AnsLen : Integer) : Boolean;
-Function BuildPayLoad(Var Q : TQueryData; Name : String; RR : Word; QClass : Word) : Integer;
-Function BuildPayLoadTCP(Var Q : TQueryDataLength; Name : String; RR : Word; QClass : Word) : Integer;
-
-Function SkipAnsQueries(Var Ans : TQueryData; L : Integer) : integer;
-Function SkipAnsQueries(Var Ans : TQueryDataLengthTCP; L : Integer) : integer;
-
-function stringfromlabel(pl: TPayLoad; var start: Integer): string;
-function stringfromlabel(pl: TPayLoadTCP; var start: Integer): string;
-Function CheckAnswer(Const Qry : TDNSHeader; Var Ans : TDNSHeader) : Boolean;
-function IsValidAtype(atype: Word): Boolean;
-
-function IsTruncated(R: TDNSHeader): Boolean;
-function GetRcode(R: TDNSHeader): TDNSRcode;
-function GetFixlenStr(pl: TPayLoad; startidx: Cardinal; len: Byte;
-  out res: ShortString): Byte;
-function GetFixlenStr(pl: TPayLoadTCP; startidx: Cardinal; len: Byte;
-  out res: ShortString): Byte;
-
-function NextNameRR(const pl: TPayLoadTCP; start: Word;
-  out RRName: TRRNameData): Boolean;
-function NextNameRR(const pl: TPayLoad; start: Word;
-  out RRName: TRRNameData): Boolean;
-
-function GetRRrecords(const pl: TPayloadTCP; var Start: Word; Count: Word):
-  TRRNameDataArray;
-function GetRRrecords(const pl: TPayload; var Start: Word; Count: Word):
-  TRRNameDataArray;
-
-function DnsLookup(dn: String; qtype: Word; out Ans: TQueryData;
-  out AnsLen: Longint): Boolean;
-function DnsLookup(dn: String; qtype: Word; out Ans: TQueryDataLengthTCP;
-  out AnsLen: Longint): Boolean;
-
-function DNSRRGetA(const RR: TRRNameData; const pl: TPayLoadTCP;
-  out IP: THostAddr): Boolean;
-function DNSRRGetA(const RR: TRRNameData; const pl: TPayLoad;
-  out IP: THostAddr): Boolean;
-function DNSRRGetCNAME(const RR: TRRNameData; const pl: TPayLoad;
-  out cn: TDNSDomainName): Boolean;
-function DNSRRGetCNAME(const RR: TRRNameData; const pl: TPayLoadTCP;
-  out cn: TDNSDomainName): Boolean;
-function DNSRRGetAAAA(const RR: TRRNameData; const pl: TPayLoadTCP;
-  out IP: THostAddr6): Boolean;
-function DNSRRGetAAAA(const RR: TRRNameData; const pl: TPayLoad;
-  out IP: THostAddr6): Boolean;
-function DNSRRGetNS(const RR: TRRNameData; const pl: TPayLoadTCP;
-  out NSName: TDNSDomainName): Boolean;
-function DNSRRGetNS(const RR: TRRNameData; const pl: TPayLoad;
-  out NSName: TDNSDomainName): Boolean;
-function DNSRRGetSOA(const RR: TRRNameData; const pl: TPayLoadTCP;
-  out dnssoa: TDNSRR_SOA): Boolean;
-function DNSRRGetSOA(const RR: TRRNameData; const pl: TPayLoad;
-  out dnssoa: TDNSRR_SOA): Boolean;
-function  DNSRRGetText(const RR: TRRNameData; const pl: TPayLoad;
-  out dnstext: AnsiString): Boolean;
-function  DNSRRGetText(const RR: TRRNameData; const pl: TPayLoadTCP;
-  out dnstext: AnsiString): Boolean;
-function DNSRRGetMX(const RR: TRRNameData; const pl: TPayLoadTCP;
-  out MX: TDNSRR_MX): Boolean;
-function DNSRRGetMX(const RR: TRRNameData; const pl: TPayLoad;
-  out MX: TDNSRR_MX): Boolean;
-function DNSRRGetPTR(const RR: TRRNameData; const pl: TPayLoadTCP;
-  out ptr: TDNSDomainName): Boolean;
-function DNSRRGetPTR(const RR: TRRNameData; const pl: TPayLoad;
-  out ptr: TDNSDomainName): Boolean;
-function DNSRRGetSRV(const RR: TRRNameData; const pl: TPayload;
-  out srv: TDNSRR_SRV): Boolean;
-function DNSRRGetSRV(const RR: TRRNameData; const pl: TPayloadTCP;
-  out srv: TDNSRR_SRV): Boolean;
-
-Implementation
-
-uses
-   asyncnet.compatibility,
-   AsyncNet.sockets,
-   stax,
-   sysutils;
-
-type
-  TTCPSocketResult = (srTimeout,srPartial,srSocketClose,srOK);
-
-var
-  DefaultDomainListArr : array of string;
-  NDots: Integer;
-
-{ ---------------------------------------------------------------------
-    Some Parsing routines
-  ---------------------------------------------------------------------}
-
-Const
-  Whitespace = [' ',#9];
-
-Function NextWord(Var Line : String) : String;
-
-Var
-  I,J : Integer;
-
+function ETCPath: String; inline;
 begin
-  I:=1;
-  While (I<=Length(Line)) and (Line[i] in Whitespace) do
-    inc(I);
-  J:=I;
-  While (J<=Length(Line)) and Not (Line[J] in WhiteSpace) do
-    inc(j);
-  Result:=Copy(Line,I,J-I);
-  Delete(Line,1,J);
+  Result := '';
+ {$If defined(ETC_BY_ENV)}
+  Result := GetEnvironmentVariable('ETC');
+  if Result <> '' then
+   Result := IncludeTrailingPathDelimiter(Result);
+ {$ElseIf defined(UNIX)}
+ Result := '/etc/';
+ {$ElseIf defined(WINDOWS)}
+ SetLength(Result, 256);
+ SetLength(Result, GetSystemDirectory(LPSTR(Result), 256));
+ Result += '\drivers\etc\';
+ {$Else}
+ {$WARNING Support for finding /etc/ directory not implemented for this platform!}
+ {$EndIf}
 end;
 
-Function StripComment(var L : String) : Boolean;
-
-Var
-  i : Integer;
-
+function ResolveDB: TResolveDB;
 begin
-  I:=Pos('#',L);
-  If (I<>0) then
-    L:=Copy(L,1,I-1)
+  Result := TResolveDB.Singleton;
+end;
+
+function ServiceDB: TServiceDB;
+begin
+  Result := TServiceDB.Singleton;
+end;
+
+function HostsDB: THostsDB;
+begin
+  Result := THostsDB.Singleton;
+end;
+
+function NetworksDB: TNetworksDB;
+begin
+  Result := TNetworksDB.Singleton;
+end;
+
+function ProtocolDB: TProtocolDB;
+begin
+  Result := TProtocolDB.Singleton;
+end;
+
+function IN4Address(const Address: String): TNetworkAddress;
+begin
+ Result := Default(TNetworkAddress);
+ Result.Address := Address;
+ Result.AddressType := atIN4;
+end;
+
+function IN6Address(const Address: String): TNetworkAddress;
+begin
+ Result := Default(TNetworkAddress);
+ Result.Address := Address;
+ Result.AddressType := atIN6;
+end;
+
+function INAddr(const Address: String): TNetworkAddress;
+begin
+ Result := Default(TNetworkAddress);
+  if Pos(':', Address) = 0 then
+    Result.AddressType := atIN4
   else
-    begin
-      I:=Pos(';',L);
-      If (I<>0) then
-        L:=Copy(L,1,I-1)
-    end;
-  Result:=Length(L)>0;
+    Result.AddressType := atIN6;
+  Result.Address := Address;
 end;
 
-Function MatchNameOrAlias(Const Entry,Name: String; Aliases : String) : Boolean;
-
-Var
-  P : Integer;
-  A : String;
-
+function IN6Equal(const A, B: String): Boolean;
+var
+  AAddr, BAddr: Tin6_addr;
 begin
-  Result:=CompareText(Entry,Name)=0;
-  If Not Result then
-    While (Not Result) and (Length(Aliases)>0) do
-      begin
-      P:=Pos(',',Aliases);
-      If (P=0) then
-        P:=Length(Aliases)+1;
-      A:=Copy(Aliases,1,P-1);
-      Delete(Aliases,1,P);
-      Result:=CompareText(A,Entry)=0;
-      end;
+  AAddr := StrToHostAddr6(A);
+  BAddr := StrToHostAddr6(B);
+  Result := (AAddr.s6_addr32[0] = BAddr.s6_addr32[0]) and
+            (AAddr.s6_addr32[1] = BAddr.s6_addr32[1]) and
+            (AAddr.s6_addr32[2] = BAddr.s6_addr32[2]) and
+            (AAddr.s6_addr32[3] = BAddr.s6_addr32[3]);
 end;
 
-{ ---------------------------------------------------------------------
-    hosts processing
-  ---------------------------------------------------------------------}
-
-Function GetAddr(Var L : String; Var Addr : THostAddr) : Boolean;
-
-Var
-  S : String;
-//  i,p,a : Integer;
-
+operator=(const A, B: TNetworkAddress): Boolean;
 begin
-  Result:=True;
-  S:=NextWord(L);
-  Addr:=StrToNetAddr(S);
-//  Writeln(s,'->',Addr.s_bytes[1],'.',Addr.s_bytes[2],'.',Addr.s_bytes[3],'.',Addr.s_bytes[4]);
-  Result:=Addr.s_bytes[1]<>0;
+  Result := (A.AddressType = B.AddressType) and (
+              ((A.AddressType = atIN4) and (A.Address = B.Address)) or // IPv4: simple string equality
+              ((A.AddressType = atIN6) and IN6Equal(A.Address, B.Address)) // IPv6 check binary equality
+            );
 end;
 
+{$if defined(android)}
 
-Function FillHostEntry (Var Entry : THostEntry; L: String) : boolean;
-
-Var
-  H : String;
-
-begin
-  Result := False;
-  Repeat
-  H:=NextWord(L);
-    If (H<>'') then begin
-      if (Entry.Name='') then
-        Entry.Name:=H
-      else
-        begin
-        If (Entry.Aliases<>'') then
-          Entry.Aliases:=Entry.Aliases+',';
-        Entry.Aliases:=Entry.Aliases+H;
-        end;
-      Result := True;
-    end;
-  until (H='');
-end;
-
-Function ProcessHosts(FileName : String) : PHostListEntry;
-
-Var
-  F : Text;
-  L : String;
-  A : THostAddr;
-  T : PHostListEntry;
-  B : Array of byte;
-  FS : Int64;
-
-begin
-  Result:=Nil;
-  Assign(F,FileName);
-  {$push}{$I-}
-  Reset(F);
-  SetLength(B,65355);
-  SetTextBuf(F,B[0],65355);
-  {$pop};
-  If (IOResult<>0) then
-    Exit;
-  Try
-    While Not EOF(F) do
-      begin
-      Readln(F,L);
-      If StripComment(L) then
-        begin
-        If GetAddr(L,A) then
-          begin
-          T:=New(PHostListEntry);
-          T^.Entry.Addr:=A;
-          FillHostEntry(T^.Entry,L);
-          T^.Next:=Result;
-          Result:=T;
-          end;
-        end;
-      end;
-  Finally
-    Close(F);
-  end;
-end;
-
-{ Internal lookup, used in GetHostByName and friends. }
-
-Var
-  HostsList : PHostListEntry = Nil;
-  HostsFileAge  : Longint;
-//  HostsFileName : String;
-
-Function FreeHostsList(var List : PHostListEntry) : Integer;
-
-Var
-  P : PHostListEntry;
-
-begin
-  Result:=0;
-  While (List<>Nil) do
-    begin
-    Inc(Result);
-    P:=List^.Next;
-    Dispose(List);
-    List:=P;
-    end;
-end;
-
-Procedure HostsListToArray(var List : PHostListEntry; Var Hosts : THostEntryArray; FreeList : Boolean);
-
-Var
-  P : PHostListEntry;
-  Len : Integer;
-
-begin
-  Len:=0;
-  P:=List;
-  While P<> Nil do
-    begin
-    Inc(Len);
-    P:=P^.Next;
-    end;
-  SetLength(Hosts,Len);
-  If (Len>0) then
-    begin
-    Len:=0;
-    P:=List;
-    While (P<>Nil) do
-      begin
-      Hosts[Len]:=P^.Entry;
-      P:=P^.Next;
-      Inc(Len);
-      end;
-    end;
-  If FreeList then
-    FreeHostsList(List);
-end;
-
-Procedure CheckHostsFile;
-
-Var
-  F : Integer;
-
-begin
-  If CheckHostsFileAge then
-    begin
-    F:=FileAge (EtcPath + SHostsFile);
-    If HostsFileAge<F then
-      begin
-      // Rescan.
-      FreeHostsList(HostsList);
-      HostsList:=ProcessHosts (EtcPath + SHostsFile);
-      HostsFileAge:=F;
-      end;
-    end;
-end;
-
-Function FindHostEntryInHostsFile(N: String; Addr: THostAddr; Var H : THostEntry) : boolean;
-
-Var
-//  F : Text;
-  HE : THostEntry;
-  P : PHostListEntry;
-
-begin
-  Result:=False;
-  CheckHostsFile;
-  P:=HostsList;
-  While (Not Result) and (P<>Nil) do
-    begin
-    HE:=P^.Entry;
-    If (N<>'') then
-      Result:=MatchNameOrAlias(N,HE.Name,HE.Aliases)
-    else
-      Result:=Cardinal(hosttonet(Addr))=Cardinal(HE.Addr);
-    P:=P^.Next;
-    end;
- If Result then
-   begin
-   H.Name:=HE.Name;
-   H.Addr:=nettohost(HE.Addr);
-   H.Aliases:=HE.Aliases;
-   end;
-end;
-
-{ ---------------------------------------------------------------------
-   Resolve.conf handling
-  ---------------------------------------------------------------------}
-
-{$ifdef android}
-
-Function GetDNSServers: Integer;
+procedure GetDNSServers(DNSList: TStringList);
 var
   i: integer;
   s: string;
-  H : THostAddr;
 begin
+  DNSList.Clear;
   if SystemApiLevel >= 26 then
-    begin
-      // Since Android 8 the net.dnsX properties can't be read.
-      // Use Google Public DNS servers
-      Result:=2;
-      SetLength(DNSServers, Result);
-      DNSServers[0]:=StrToNetAddr('8.8.8.8');
-      DNSServers[1]:=StrToNetAddr('8.8.4.4');
-      exit;
-    end;
+  begin
+    // Since Android 8 the net.dnsX properties can't be read.
+    // Use Google Public DNS servers
+    SetLength(DNSServers, Result);
+    DNSList.Add('8.8.8.8');
+    DNSList.Add('8.8.4.4');
+    exit;
+  end;
 
-  Result:=0;
-  SetLength(DNSServers, 9);
   for i:=1 to 9 do
-    begin
-      s:=GetSystemProperty(PAnsiChar('net.dns' + IntToStr(i)));
-      if s = '' then
-        break;
-      H:=StrToNetAddr(s);
-      if H.s_bytes[1] <> 0 then
-        begin
-          DNSServers[Result]:=H;
-          Inc(Result);
-        end;
-    end;
-  SetLength(DNSServers, Result);
+  begin
+    s:=GetSystemProperty(PAnsiChar('net.dns' + IntToStr(i)));
+    if s = '' then
+      break;
+    DNSList.Add(s);
+  end;
 end;
 
-var
-  LastChangeProp: string;
+{$ElseIf defined(Windows)}
 
-Procedure CheckResolveFile;
-var
-  n, v: string;
-begin
-  if not CheckResolveFileAge then
-    exit;
-
-  if (Length(DNSServers) = 0) and (SystemApiLevel >= 26) then
-    begin
-      GetDNSServers;
-      exit;
-    end;
-
-  n:=GetSystemProperty('net.change');
-  if n <> '' then
-    v:=GetSystemProperty(PAnsiChar(n))
-  else
-    v:='';
-  n:=n + '=' + v;
-  if LastChangeProp = n then
-    exit;
-  LastChangeProp:=n;
-  GetDNSServers;
-end;
-
-{$else}
-
-{$ifdef WINDOWS}
-procedure AddDNS(const ADNS: IP_ADDRESS_STRING); inline;
-begin
-  SetLength(DNSServers, Length(DNSServers) + 1);
-  DNSServers[Length(DNSServers) - 1] := StrToNetAddr(PChar(@ADNS.S));
-end;
-
-function GetDNSServers: Integer;
+procedure GetDNSServers(DNSList: TStringList);
 var
   pFI: PFIXED_INFO;
   pIPAddr: PIPAddrString;
   OutLen: ULONG;
 begin
-  DNSServers := nil;
-  Result := 0;
   OutLen := SizeOf(TFixedInfo);
   GetMem(pFI, SizeOf(TFixedInfo));
   try
@@ -696,12 +479,12 @@ begin
     // If there is no network available there may be no DNS servers defined
     if pFI^.DnsServerList.IpAddress.S[0] = #0 then Exit;
     // Add first server
-    AddDNS(pFI^.DnsServerList.IpAddress);
+    DNSList.Add(PChar(@pFI^.DnsServerList.IpAddress));
     // Add rest of servers
     pIPAddr := pFI^.DnsServerList.Next;
     while Assigned(pIPAddr) do
     begin
-      AddDNS(pIPAddr^.IpAddress);
+      DNSList.Add(PChar(@pIPAddr^.IpAddress));
       pIPAddr := pIPAddr^.Next;
     end;
   finally
@@ -709,1917 +492,13 @@ begin
   end;
 end;
 
-Procedure CheckResolveFile;
-begin
-  if CheckResolveFileAge then
-    GetDNSServers;
-end;
-
-{$else}
-
-Var
-  ResolveFileAge  : Longint;
-  ResolveFileName : String;
-
-Function GetDNSServers(Fn : String) : Integer;
-
-Var
-  R : Text;
-  L : String;
-//  I : Integer;
-  H : THostAddr;
-  E : THostEntry;
-
-  Function CheckDirective(Dir : String) : Boolean;
-
-  Var
-    P : Integer;
-
-  begin
-    P:=Pos(Dir,L);
-    Result:=(P<>0);
-    If Result then
-      begin
-      Delete(L,1,P+Length(Dir));
-      L:=Trim(L);
-      end;
-  end;
-
-begin
-  Result:=0;
-  ResolveFileName:=Fn;
-  ResolveFileAge:=FileAge(FN);
-  DefaultDomainListArr:=[];
-  NDots:=1;
-  {$push}{$i-}
-  Assign(R,FN);
-  Reset(R);
-  {$pop}
-  If (IOResult<>0) then
-    exit;
-  Try
-    While not EOF(R) do
-      begin
-      Readln(R,L);
-      if StripComment(L) then
-        If CheckDirective('nameserver') then
-          begin
-          H:=HostToNet(StrToHostAddr(L));
-          If (H.s_bytes[1]<>0) then
-            begin
-            setlength(DNSServers,Result+1);
-            DNSServers[Result]:=H;
-            Inc(Result);
-            end
-          else if FindHostEntryInHostsFile(L,H,E) then
-            begin
-            setlength(DNSServers,Result+1);
-            DNSServers[Result]:=E.Addr;
-            Inc(Result);
-            end;
-          end
-        else if CheckDirective('domain') then
-          DefaultDomainList:=L
-        else if CheckDirective('search') then
-          DefaultDomainList:=L
-        else if CheckDirective('options') then
-          DNSOptions:=L;
-      end;
-  Finally
-    Close(R);
-  end;
-  L := GetEnvironmentVariable('LOCALDOMAIN');
-  if L <> '' then
-    DefaultDomainList := L;
-end;
-
-Procedure CheckResolveFile;
-
-Var
-  F : Integer;
-  N : String;
-
-begin
-  If CheckResolveFileAge then
-    begin
-    N:=ResolveFileName;
-    if (N='') then
-      N:=EtcPath + SResolveFile;
-    F:=FileAge(N);
-    If ResolveFileAge<F then
-      GetDnsServers(N);
-    end;
-end;
-
-{$endif WINDOWS}
-{$endif android}
-
-{ ---------------------------------------------------------------------
-    Payload handling functions.
-  ---------------------------------------------------------------------}
-
-
-Procedure DumpPayLoad(Q : TQueryData; L : Integer);
-
-Var
-  i : Integer;
-
-begin
-  Writeln('Payload : ',l);
-  For I:=0 to L-1 do
-    Write(Q.Payload[i],' ');
-  Writeln;
-end;
-
-Function BuildPayLoad(Var Q : TQueryData; Name : String; RR : Word; QClass : Word) : Integer;
-
-Var
-  P : PByte;
-  l,S : Integer;
-
-begin
-  Result:=-1;
-  If (Length(Name) = 0) or (length(Name)>506) then
-    Exit;
-
-  Result:=0;
-  P:=@Q.Payload[0];
-  Repeat
-    L:=Pos('.',Name);
-    If (L=0) then
-      S:=Length(Name)
-    else
-      S:=L-1;
-    // empty label is invalid, unless it's a dot at the end.
-    if (S = 0) then
-    begin
-      if (Length(Name) > 0) then
-      begin
-        Result := -1;
-        exit;
-      end
-      else
-        break; // empty label at end, break out for final 0 length byte.
-    end;
-    P[Result]:=S;
-    Move(Name[1],P[Result+1],S);
-    Inc(Result,S+1);
-    If (L>0) then
-      Delete(Name,1,L);
-  Until (L=0);
-  P[Result]:=0;
-  rr := htons(rr);
-  Move(rr,P[Result+1],2);
-  Inc(Result,3);
-  QClass := htons(QClass);
-  Move(qclass,P[Result],2);
-  Inc(Result,2);
-end;
-
-{Construct a TCP query payload from the given name, rr and qclass. The
- principal difference between the TCP and UDP payloads is the two-octet
- length field in the TCP payload. The UDP payload has no length field.
-
- See RFC-1035, section 4.2.2.
-
- Returns the length of the constructed payload, which doesn't include
- the header or the length field.}
-function BuildPayLoadTCP(var Q: TQueryDataLength; Name: String; RR: Word;
-  QClass: Word): Integer;
-var
-  l: Word;
-begin
-  l := BuildPayLoad(Q.hpl, Name, RR, QClass);
-  Q.length := htons(l + SizeOf(Q.hpl.h));
-  Result := l;
-end;
-
-Function NextRR(Const PayLoad : TPayLoad;Var Start : LongInt; AnsLen : LongInt; Var RR : TRRData) : Boolean;
-
-Var
-  I : Integer;
-  HaveName : Boolean;
-  PA : PRRData;
-
-begin
-  Result:=False;
-  I:=Start;
-  // Skip labels and pointers. At least 1 label or pointer is present.
-  Repeat
-    HaveName:=True;
-    If (Payload[i]>63) then // Pointer, skip
-      Inc(I,2)
-    else If Payload[i]=0 then // Null termination of label, skip.
-      Inc(i)
-    else
-      begin
-      Inc(I,Payload[i]+1); // Label, continue scan.
-      HaveName:=False;
-      end;
-  Until HaveName or (I>(AnsLen-SizeOf(TRRData)));
-  Result:=(I<=(AnsLen-SizeOf(TRRData)));
-  // Check RR record.
-  PA:=PRRData(@Payload[i]);
-  RR:=PA^;
-  Start:=I+SizeOf(TRRData);
-end;
-
-
-Function BuildName (Const PayLoad : TPayLoad; Start,len : Integer) : String;
-
-Const
-  FIREDNS_POINTER_VALUE = $C000;
-
-Var
-  I,O : Integer;
-  P : Word;
-
-begin
-  SetLength(Result,512);
-  I:=Start;
-  O:=1;
-  // Copy labels and pointers. At least 1 label or pointer is present.
-  Repeat
-    If (Payload[i]>63) then // Pointer, move.
-      begin
-      Move(Payload[i],P,2);
-      I:=ntohs(p)-FIREDNS_POINTER_VALUE-12;
-      end
-    else if Payload[i]<>0 then // Label, copy
-      begin
-      If O<>1 then
-        begin
-        Result[O]:='.';
-        Inc(O);
-        end;
-      P:=Payload[i];
-      Move(Payload[i+1],Result[o],P);
-      Inc(I,P+1);
-      Inc(O,P);
-      end;
-   Until (Payload[I]=0);
-   setlength(result,o-1);
-end;
-
-
-{ ---------------------------------------------------------------------
-    QueryData handling functions
-  ---------------------------------------------------------------------}
-
-function CheckAnswer(const Qry: TDNSHeader; var Ans: TDNSHeader): Boolean;
-begin
-  Result:=False;
-  With Ans do
-    begin
-    // Check ID.
-    If (ID[1]<>QRY.ID[1]) or (ID[0]<>Qry.ID[0]) then
-      exit;
-    // Flags ?
-    If (Flags1 and QF_QR)=0 then
-      exit;
-    if (Flags1 and QF_OPCODE)<>0 then
-      exit;
-    if (Flags2 and QF_RCODE)<>0 then
-      exit;
-    // Number of answers ?
-    AnCount := htons(Ancount);
-    If Ancount<1 then
-      Exit;
-    Result:=True;
-    end;
-end;
-
-{
- Check that Atype is valid. These are the DNSQRY_? params we support. See the
- definitions at the top of this unit for the names.
- Deliberately excluding axfr (252), mailb (253), maila (254), and * (255).
-}
-function IsValidAtype(atype: Word): Boolean;
-begin
-  Result := False;
-  case atype of
-    1 .. 16, 28, 33: Result := True;
-  end;
-end;
-
-function IsTruncated(R: TDNSHeader): Boolean;
-begin
-  Result := ((R.flags1 and QF_TC) > 0);
-end;
-
-function GetRcode(R: TDNSHeader): TDNSRcode;
-var
-  rcode_n: Byte;
-begin
-  rcode_n := (R.flags2 and QF_RCODE);
-  case rcode_n of
-    0: Result := rcNoError;
-    1: Result := rcFormatError;
-    2: Result := rcServFail;
-    3: Result := rcNXDomain;
-    4: Result := rcNotImpl;
-    5: Result := rcRefused;
-    6 .. 15: Result := rcReserved;
-  else
-    Result := rcInvalid;
-  end;
-end;
-
-function GetFixlenStr(pl: TPayLoad; startidx: Cardinal; len: Byte; out
-  res: ShortString): Byte;
-begin
-  Result := 0;
-  res := '';
-  if (startidx + len) > Length(pl) then exit;
-  SetLength(res, len);
-  Move(pl[startidx], res[1], len);
-  Result := len;
-end;
-
-function GetFixlenStr(pl: TPayLoadTCP; startidx: Cardinal; len: Byte;
-  out res: ShortString): Byte;
-begin
-  Result := 0;
-  res := '';
-  if (startidx + len) > Length(pl) then exit;
-  SetLength(res, len);
-  Move(pl[startidx], res[1], len);
-  Result := len;
-end;
-
-function NextNameRR(const pl: TPayLoadTCP; start: Word; out RRName: TRRNameData
-  ): Boolean;
-var
-  I : Integer;
-  PA : PRRData;
-
-begin
-  Result:=False;
-  I:=Start;
-  if (Length(pl) - I) < (SizeOf(TRRData)+2) then exit;
-  RRName.RRName := stringfromlabel(pl, I);
-  if (Length(pl) - I) < (SizeOf(TRRData)) then exit;
-
-  PA:=PRRData(@pl[I]);
-  RRName.RRMeta := PA^;
-  RRName.RRMeta.AClass := NToHs(RRName.RRMeta.AClass);
-  RRName.RRMeta.Atype := NToHs(RRName.RRMeta.Atype);
-  if not IsValidAtype(RRName.RRMeta.Atype) then
-    exit;
-  RRName.RRMeta.RDLength := NToHs(RRName.RRMeta.RDLength);
-  RRName.RRMeta.TTL := NToHl(RRName.RRMeta.TTL);
-  RRName.RDataSt := I+SizeOf(TRRData);
-  // verify that start + rdlength is within the buffer boundary.
-  if RRName.RDataSt + RRName.RRMeta.RDLength > Length(pl) then exit;
-  Result := True;
-end;
-
-function NextNameRR(const pl: TPayLoad; start: Word; out RRName: TRRNameData
-  ): Boolean;
-var
-  I : Integer;
-  PA : PRRData;
-
-begin
-  Result:=False;
-  I:=Start;
-  if (Length(pl) - I) < (SizeOf(TRRData)+2) then exit;
-  RRName.RRName := stringfromlabel(pl, I);
-  if (Length(pl) - I) < (SizeOf(TRRData)) then exit;
-
-  PA:=PRRData(@pl[I]);
-  RRName.RRMeta := PA^;
-  RRName.RRMeta.AClass := NToHs(RRName.RRMeta.AClass);
-  RRName.RRMeta.Atype := NToHs(RRName.RRMeta.Atype);
-  if not IsValidAtype(RRName.RRMeta.Atype) then
-    exit;
-
-  RRName.RRMeta.RDLength := NToHs(RRName.RRMeta.RDLength);
-  RRName.RRMeta.TTL := NToHl(RRName.RRMeta.TTL);
-  RRName.RDataSt := I+SizeOf(TRRData);
-  // verify that start + rdlength is within the buffer boundary.
-  if RRName.RDataSt + RRName.RRMeta.RDLength > Length(pl) then exit;
-  Result := True;
-end;
-
-function GetRRrecords(const pl: TPayloadTCP; var Start: Word; Count: Word
-  ): TRRNameDataArray;
-var
-  I, Total: Word;
-  B: Boolean;
-  RRN: TRRNameData;
-
-begin
-  I:=0;
-  Total := 0;
-  SetLength(Result,Count);
-  while (I < Count) do
-  begin
-    B := NextNameRR(pl, Start, RRN);
-    if not B then break;
-    Inc(Total);
-    Result[I] := RRN;
-    Inc(I);
-    Start := RRN.RDataSt+RRN.RRMeta.RDLength;
-  end;
-  if Total < Count then SetLength(Result,Total);
-end;
-
-function GetRRrecords(const pl: TPayload; var Start: Word; Count: Word
-  ): TRRNameDataArray;
-var
-  I, Total: Word;
-  B: Boolean;
-  RRN: TRRNameData;
-
-begin
-  I:=0;
-  Total := 0;
-  SetLength(Result,Count);
-  while (I < Count) do
-  begin
-    B := NextNameRR(pl, Start, RRN);
-    if not B then break;
-    Inc(Total);
-    Result[I] := RRN;
-    Inc(I);
-    Start := RRN.RDataSt+RRN.RRMeta.RDLength;
-  end;
-  if Total < Count then SetLength(Result,Total);
-end;
-
-function DnsLookup(dn: String; qtype: Word; out Ans: TQueryData; out
-  AnsLen: Longint): Boolean;
-var
-  Qry: TQueryData;
-  QryLen: Longint;
-  idx: Word;
-begin
-  Result := False;
-  AnsLen := -2;
-
-  CheckResolveFile;
-  if Length(DNSServers) = 0 then
-    exit;
-
-  QryLen := BuildPayLoad(Qry, dn, qtype, 1);
-  if QryLen <= 0 then exit;
-
-  AnsLen := -1;
-  { Try the query at each configured resolver in turn, until one of them
-   returns an answer. We check for AnsLen > -1 because we need to distinguish
-   between failure to connect and the server saying it doesn't know or can't
-   answer. If AnsLen = -1 then we failed to connect. If AnsLen >= 0 but qr
-   = False, then we connected but the server returned an error code.}
-  idx := 0;
-  repeat
-    Result := Query(idx,Qry,Ans,QryLen,AnsLen);
-    Inc(idx);
-  until (idx > High(DNSServers)) or (Result = True) or (AnsLen >= 0);
-end;
-
-function DnsLookup(dn: String; qtype: Word; out Ans: TQueryDataLengthTCP; out
-  AnsLen: Longint): Boolean;
-var
-  Qry: TQueryDataLength;
-  QryLen: Longint;
-  idx: Word;
-
-begin
-  Result := False;
-  AnsLen := -2;
-
-  CheckResolveFile;
-  if Length(DNSServers) = 0 then
-    exit;
-
-  QryLen:=BuildPayLoadTCP(Qry, dn, qtype, 1);
-  if QryLen <= 0 then exit;
-  AnsLen := -1;
-
-  { Try the query at each configured resolver in turn, until one of them
-   returns an answer. We check for AnsLen > -1 because we need to distinguish
-   between failure to connect and the server saying it doesn't know or can't
-   answer. If AnsLen = -1 then we failed to connect. If AnsLen >= 0 but qr
-   = False, then we connected but the server returned an error code.}
-  idx := 0;
-  repeat
-    Result := QueryTCP(idx,Qry,Ans,QryLen,AnsLen);
-    Inc(idx);
-  until (idx > High(DNSServers)) or (Result = True) or (AnsLen >= 0);
-end;
-
-function DNSRRGetA(const RR: TRRNameData; const pl: TPayLoadTCP; out
-  IP: THostAddr): Boolean;
-begin
-  IP.s_addr := 0;
-  Result := False;
-  if RR.RRMeta.Atype <> DNSQRY_A then exit;
-  if (Length(pl) - RR.RDataSt) < 4 then exit;
-  Move(pl[RR.RDataSt], IP, SizeOf(THostAddr));
-  IP.s_addr := NToHl(IP.s_addr);
-  Result := True;
-end;
-
-function DNSRRGetA(const RR: TRRNameData; const pl: TPayLoad; out IP: THostAddr
-  ): Boolean;
-begin
-  IP.s_addr := 0;
-  Result := False;
-  if RR.RRMeta.Atype <> DNSQRY_A then exit;
-  if (Length(pl) - RR.RDataSt) < 4 then exit;
-  Move(pl[RR.RDataSt], IP, SizeOf(THostAddr));
-  IP.s_addr := NToHl(IP.s_addr);
-  Result := True;
-end;
-
-function DNSRRGetCNAME(const RR: TRRNameData; const pl: TPayLoad; out
-  cn: TDNSDomainName): Boolean;
-var
-  n: Integer;
-begin
-  Result := False;
-  cn := '';
-  if RR.RRMeta.Atype <> DNSQRY_CNAME then exit;
-  n := RR.RDataSt;
-  if (RR.RDataSt + RR.RRMeta.RDLength) > Length(pl) then exit;
-  cn := stringfromlabel(pl, n);
-  Result := True;
-end;
-
-function DNSRRGetCNAME(const RR: TRRNameData; const pl: TPayLoadTCP; out
-  cn: TDNSDomainName): Boolean;
-var
-  n: Integer;
-begin
-  Result := False;
-  cn := '';
-  if RR.RRMeta.Atype <> DNSQRY_CNAME then exit;
-  n := RR.RDataSt;
-  if (n + RR.RRMeta.rdlength) > Length(pl) then exit;
-  cn := stringfromlabel(pl, n);
-  Result := True;
-end;
-
-function DNSRRGetAAAA(const RR: TRRNameData; const pl: TPayLoadTCP; out
-  IP: THostAddr6): Boolean;
-begin
-  IP.s6_addr32[0] := 0;
-  IP.s6_addr32[1] := 0;
-  IP.s6_addr32[2] := 0;
-  IP.s6_addr32[3] := 0;
-  Result := False;
-  if RR.RRMeta.Atype <> DNSQRY_AAAA then exit;
-  if (RR.RDataSt + SizeOf(THostAddr6)) > Length(pl) then exit;
-  Move(pl[RR.RDataSt],IP,SizeOf(THostAddr6));
-  Result := True;
-end;
-
-function DNSRRGetAAAA(const RR: TRRNameData; const pl: TPayLoad; out
-  IP: THostAddr6): Boolean;
-begin
-  IP.s6_addr32[0] := 0;
-  IP.s6_addr32[1] := 0;
-  IP.s6_addr32[2] := 0;
-  IP.s6_addr32[3] := 0;
-  Result := False;
-  if RR.RRMeta.Atype <> DNSQRY_AAAA then exit;
-  if (RR.RDataSt + SizeOf(THostAddr6)) > Length(pl) then exit;
-  Move(pl[RR.RDataSt],IP,SizeOf(THostAddr6));
-  Result := True;
-end;
-
-function DNSRRGetNS(const RR: TRRNameData; const pl: TPayLoadTCP; out
-  NSName: TDNSDomainName): Boolean;
-var
-  n: LongInt;
-begin
-  NSName := '';
-  Result := False;
-  if RR.RRMeta.Atype <> DNSQRY_NS then exit;
-  if (RR.RDataSt + RR.RRMeta.RDLength) > Length(pl) then exit;
-  n := RR.RDataSt;
-  NSName := stringfromlabel(pl, n);
-  Result := True;
-end;
-
-function DNSRRGetNS(const RR: TRRNameData; const pl: TPayLoad; out
-  NSName: TDNSDomainName): Boolean;
-var
-  n: LongInt;
-begin
-  NSName := '';
-  Result := False;
-  if RR.RRMeta.Atype <> DNSQRY_NS then exit;
-  if (RR.RDataSt + RR.RRMeta.RDLength) > Length(pl) then exit;
-  n := RR.RDataSt;
-  NSName := stringfromlabel(pl, n);
-  Result := True;
-end;
-
-function DNSRRGetSOA(const RR: TRRNameData; const pl: TPayLoadTCP; out
-  dnssoa: TDNSRR_SOA): Boolean;
-var
-  idx: Integer;
-begin
-  // can't trust the counts we've been given, so check that we never
-  // exceed the end of the payload buffer.
-  idx := RR.RDataSt;
-  Result := False;
-  if RR.RRMeta.Atype <> DNSQRY_SOA then exit;
-  dnssoa.mname := stringfromlabel(pl, idx);
-  if idx >= Length(pl) then exit;
-
-  dnssoa.rname := stringfromlabel(pl, idx);
-
-  if (idx + (SizeOf(Cardinal) * 5)) > Length(pl) then exit;
-  Move(pl[idx],dnssoa.serial,SizeOf(Cardinal));
-  Inc(idx, SizeOf(Cardinal));
-  Move(pl[idx], dnssoa.refresh, SizeOf(Cardinal));
-  Inc(idx, SizeOf(Cardinal));
-  Move(pl[idx], dnssoa.retry, SizeOf(Cardinal));
-  Inc(idx, SizeOf(Cardinal));
-  Move(pl[idx], dnssoa.expire, SizeOf(Cardinal));
-  Inc(idx, SizeOf(Cardinal));
-  Move(pl[idx], dnssoa.min, SizeOf(Cardinal));
-  Result := True;
-  dnssoa.serial := NToHl(dnssoa.serial);
-  dnssoa.min := NToHl(dnssoa.min);
-  dnssoa.expire := NToHl(dnssoa.expire);
-  dnssoa.refresh := NToHl(dnssoa.refresh);
-  dnssoa.retry := NToHl(dnssoa.retry);
-end;
-
-function DNSRRGetSOA(const RR: TRRNameData; const pl: TPayLoad; out
-  dnssoa: TDNSRR_SOA): Boolean;
-var
-  idx: Integer;
-begin
-  // can't trust the counts we've been given, so check that we never
-  // exceed the end of the payload buffer.
-  idx := RR.RDataSt;
-  Result := False;
-  if RR.RRMeta.Atype <> DNSQRY_SOA then exit;
-  dnssoa.mname := stringfromlabel(pl, idx);
-  if idx >= Length(pl) then exit;
-
-  dnssoa.rname := stringfromlabel(pl, idx);
-
-  if (idx + (SizeOf(Cardinal) * 5)) > Length(pl) then exit;
-  Move(pl[idx],dnssoa.serial,SizeOf(Cardinal));
-  Inc(idx, SizeOf(Cardinal));
-  Move(pl[idx], dnssoa.refresh, SizeOf(Cardinal));
-  Inc(idx, SizeOf(Cardinal));
-  Move(pl[idx], dnssoa.retry, SizeOf(Cardinal));
-  Inc(idx, SizeOf(Cardinal));
-  Move(pl[idx], dnssoa.expire, SizeOf(Cardinal));
-  Inc(idx, SizeOf(Cardinal));
-  Move(pl[idx], dnssoa.min, SizeOf(Cardinal));
-  Result := True;
-  dnssoa.serial := NToHl(dnssoa.serial);
-  dnssoa.min := NToHl(dnssoa.min);
-  dnssoa.expire := NToHl(dnssoa.expire);
-  dnssoa.refresh := NToHl(dnssoa.refresh);
-  dnssoa.retry := NToHl(dnssoa.retry);
-end;
-
-function DNSRRGetText(const RR: TRRNameData; const pl: TPayLoad; out
-  dnstext: AnsiString): Boolean;
-var
-  wrk: ShortString;
-  idx: LongInt;
-  l: Byte;
-begin
-  Result := False;
-  dnstext := '';
-  if RR.RRMeta.Atype <> DNSQRY_TXT then exit;
-  wrk := '';
-
-  idx := RR.RDataSt;
-  if (Length(pl) - idx)  < 2 then exit;
-
-  repeat
-    l := GetFixlenStr(pl, idx+1, pl[idx], wrk);
-    if l = 0 then exit; // count would send us past end of buffer
-    dnstext := dnstext + wrk;
-    Inc(idx, l+1);
-  until (idx >= (RR.RDataSt + RR.RRMeta.RDLength)) or ((Length(pl) - idx) < 2);
-  Result := True;
-end;
-
-function DNSRRGetText(const RR: TRRNameData; const pl: TPayLoadTCP; out
-  dnstext: AnsiString): Boolean;
-var
-  wrk: ShortString;
-  idx: LongInt;
-  l: Byte;
-begin
-  Result := False;
-  dnstext := '';
-  if RR.RRMeta.Atype <> DNSQRY_TXT then exit;
-  wrk := '';
-
-  idx := RR.RDataSt;
-  if (Length(pl) - idx)  < 2 then exit;
-
-  repeat
-    l := GetFixlenStr(pl, idx+1, pl[idx], wrk);
-    if l = 0 then exit; // count would send us past end of buffer
-    dnstext := dnstext + wrk;
-    Inc(idx, l+1);
-  until (idx >= (RR.RDataSt + RR.RRMeta.RDLength)) or ((Length(pl) - idx) < 2);
-  Result := True;
-end;
-
-function DNSRRGetMX(const RR: TRRNameData; const pl: TPayLoadTCP; out
-  MX: TDNSRR_MX): Boolean;
-var
-  idx: Integer;
-begin
-  Result := False;
-  MX.preference := 0;
-  MX.exchange := '';
-  if RR.RRMeta.Atype <> DNSQRY_MX then exit;
-  idx := RR.RDataSt;
-  if idx + SizeOf(Word) >= Length(pl) then exit;
-  Move(pl[idx],MX.preference, SizeOf(Word));
-  Inc(idx, SizeOf(Word));
-  if (Length(pl) - idx) < 2 then exit;
-  MX.exchange := stringfromlabel(pl, idx);
-  MX.preference := NToHs(MX.preference);
-  Result := True;
-end;
-
-function DNSRRGetMX(const RR: TRRNameData; const pl: TPayLoad; out MX: TDNSRR_MX
-  ): Boolean;
-var
-  idx: Integer;
-begin
-  Result := False;
-  MX.preference := 0;
-  MX.exchange := '';
-  if RR.RRMeta.Atype <> DNSQRY_MX then exit;
-  idx := RR.RDataSt;
-  if idx + SizeOf(Word) >= Length(pl) then exit;
-  Move(pl[idx],MX.preference, SizeOf(Word));
-  Inc(idx, SizeOf(Word));
-  if (Length(pl) - idx) < 2 then exit;
-  MX.exchange := stringfromlabel(pl, idx);
-  MX.preference := NToHs(MX.preference);
-  Result := True;
-end;
-
-function DNSRRGetPTR(const RR: TRRNameData; const pl: TPayLoadTCP; out
-  ptr: TDNSDomainName): Boolean;
-var
-  n: Integer;
-begin
-  Result := False;
-  ptr := '';
-  if RR.RRMeta.Atype <> DNSQRY_PTR then exit;
-  n := RR.RDataSt;
-  if (n + RR.RRMeta.RDLength) > Length(pl) then exit;
-  ptr := stringfromlabel(pl, n);
-  Result := True;
-end;
-
-function DNSRRGetPTR(const RR: TRRNameData; const pl: TPayLoad; out
-  ptr: TDNSDomainName): Boolean;
-var
-  n: Integer;
-begin
-  Result := False;
-  ptr := '';
-  if RR.RRMeta.Atype <> DNSQRY_PTR then exit;
-  n := RR.RDataSt;
-  if (n + RR.RRMeta.RDLength) > Length(pl) then exit;
-  ptr := stringfromlabel(pl, n);
-  Result := True;
-end;
-
-function DNSRRGetSRV(const RR: TRRNameData; const pl: TPayload; out
-  srv: TDNSRR_SRV): Boolean;
-var
-  idx: Integer;
-begin
-  Result := False;
-  srv.priority := 0;
-  srv.weight := 0;
-  srv.port := 0;
-  srv.target := '';
-  if RR.RRMeta.Atype <> DNSQRY_SRV then exit;
-
-  idx := RR.RDataSt;
-  if idx +  RR.RRMeta.RDLength > Length(pl) then exit;
-
-  Move(pl[idx], srv.priority, SizeOf(Word));
-  Inc(idx, SizeOf(Word));
-  if (Length(pl) - idx) < 2 then exit;
-
-  Move(pl[idx], srv.weight, SizeOf(Word));
-  Inc(idx, SizeOf(Word));
-  if (Length(pl) - idx) < 2 then exit;
-
-  Move(pl[idx], srv.port, SizeOf(Word));
-  Inc(idx, SizeOf(Word));
-  if (Length(pl) - idx) < 2 then exit;
-
-  srv.target := stringfromlabel(pl, idx);
-
-  srv.priority := NToHs(srv.priority);
-  srv.weight := NToHs(srv.weight);
-  srv.port := NToHs(srv.port);
-
-  Result := True;
-end;
-
-function DNSRRGetSRV(const RR: TRRNameData; const pl: TPayloadTCP; out
-  srv: TDNSRR_SRV): Boolean;
-var
-  idx: Integer;
-begin
-  Result := False;
-  srv.priority := 0;
-  srv.weight := 0;
-  srv.port := 0;
-  srv.target := '';
-  if RR.RRMeta.Atype <> DNSQRY_SRV then exit;
-
-  idx := RR.RDataSt;
-  if idx +  RR.RRMeta.RDLength > Length(pl) then exit;
-
-  Move(pl[idx], srv.priority, SizeOf(Word));
-  Inc(idx, SizeOf(Word));
-  if (Length(pl) - idx) < 2 then exit;
-
-  Move(pl[idx], srv.weight, SizeOf(Word));
-  Inc(idx, SizeOf(Word));
-  if (Length(pl) - idx) < 2 then exit;
-
-  Move(pl[idx], srv.port, SizeOf(Word));
-  Inc(idx, SizeOf(Word));
-  if (Length(pl) - idx) < 2 then exit;
-
-  srv.target := stringfromlabel(pl, idx);
-
-  srv.priority := NToHs(srv.priority);
-  srv.weight := NToHs(srv.weight);
-  srv.port := NToHs(srv.port);
-
-  Result := True;
-end;
-
-Function SkipAnsQueries(Var Ans : TQueryData; L : Integer) : integer;
-
-Var
-  Q,I : Integer;
-
-begin
-  Result:=0;
-  With Ans do
-    begin
-    h.qdcount := htons(h.qdcount);
-    i:=0;
-    q:=0;
-    While (Q<h.qdcount) and (i<l) do
-      begin
-      If Payload[i]>63 then
-        begin
-        Inc(I,6);
-        Inc(Q);
-        end
-      else
-        begin
-        If Payload[i]=0 then
-          begin
-          inc(q);
-          Inc(I,5);
-          end
-        else
-          Inc(I,Payload[i]+1);
-        end;
-      end;
-    Result:=I;
-    end;
-end;
-
-function SkipAnsQueries(var Ans: TQueryDataLengthTCP; L: Integer): integer;
-var
-  Q,I : Integer;
-
-begin
-  Result:=0;
-  With Ans do
-  begin
-    h.qdcount := htons(h.qdcount);
-    i:=0;
-    q:=0;
-    While (Q<h.qdcount) and (i<l) do
-    begin
-      If Payload[i]>63 then
-      begin
-        Inc(I,6);
-        Inc(Q);
-      end
-      else
-      begin
-        If Payload[i]=0 then
-        begin
-          inc(q);
-          Inc(I,5);
-        end
-        else
-          Inc(I,Payload[i]+1);
-      end;
-    end;
-    Result:=I;
-  end;
-end;
-
-{ ---------------------------------------------------------------------
-    DNS Query functions.
-  ---------------------------------------------------------------------}
-
-
-Function Query(Resolver : Integer; Var Qry,Ans : TQueryData; QryLen : Integer; Var AnsLen : Integer) : Boolean;
-
-Var
-  DnsAddr: String;
-  Sock,L : Longint;
-  RTO : Longint;
-  Exec: TExecutable;
-begin
-  Exec := GetCurrentExecution;
-  if not Assigned(Exec) then
-    raise ENotAnExecutionException.Create('Can only be called from within an asynchronous execution');
-  Result:=False;
-  With Qry.h do
-    begin
-    ID[0]:=Random(256);
-    ID[1]:=Random(256);
-    Flags1:=QF_RD;
-    Flags2:=0;
-    qdcount:=htons(1); // was 1 shl 8;
-    ancount:=0;
-    nscount:=0;
-    arcount:=0;
-    end;
-  Sock := fpsocket(AF_INET, SOCK_DGRAM, 0);
-  If SocketInvalid(Sock) then
-    Exit;
-  DnsAddr := NetAddrToStr(DNSServers[Resolver]);
-  try
-    try
-      Await(AsyncSendTo(Sock, DnsAddr, DNSPort, @Qry, QryLen + 12));
-      // Wait for answer.
-      RTO:=TimeOutS*1000+TimeOutMS;
-      L := specialize Await<TUDPReceiveFromResult>(AsyncReceiveFrom(sock, @Ans, SizeOf(Ans)), RTO).Size;
-    except
-      on E: EAwaitTimeoutException do
-        Exit;
-      on E: ESocketError do // sockert error -> just exit
-        Exit;
-    end;
-  finally
-    CloseSocket(Sock);
-  end;
-
-  if L < 12 then exit;
-  // Return Payload length.
-  Anslen:=L-12;
-  // even though we may still return false to indicate an error, if AnsLen
-  // is >= 0 then the caller knows the dns server responded.
-  If not CheckAnswer(Qry.h,Ans.h) Then
-    exit;
-  Result:=True;
-  //end;
-end;
-
-function QueryTCP(Resolver: Integer; var Qry: TQueryDataLength;
-  var Ans: TQueryDataLengthTCP; QryLen: Integer; var AnsLen: Integer): Boolean;
-Var
-  SA : TInetSockAddr;
-  Sock : TSocket;
-  L: SizeInt;
-  RTO : Longint;
-  ReadFDS : TFDSet;
-  count: Integer;
-  sendsize: SizeInt;
-  respsize: Word;
-  resp: TTCPSocketResult;
-  tstart: QWord;
-  DNSAddr: String;
-
-begin
-  tstart := GetTickCount64;
-  Result:=False;
-  With Qry.hpl.h do
-  begin
-    ID[0]:=Random(256);
-    ID[1]:=Random(256);
-    Flags1:=QF_RD;
-    Flags2:=0;
-    qdcount:=htons(1); // was 1 shl 8;
-    ancount:=0;
-    nscount:=0;
-    arcount:=0;
-  end;
-  DNSAddr := NetAddrToStr(DNSServers[Resolver]);
-  Sock:=FpSocket(AF_INET,SOCK_STREAM,0);
-  If SocketInvalid(Sock) then
-    exit;
-  try
-    try
-      // connect to the resolver
-      Await(AsyncConnect(Sock, DNSAddr, DNSPort));
-      // send the query to the resolver
-      sendsize := QryLen + SizeOf(Qry.hpl.h) + SizeOf(Qry.length);
-      Await(AsyncSend(Sock, @Query, sendsize));
-      // tell other side we're done writing.
-      fpshutdown(Sock, SHUT_WR);
-      // Timeout receive
-      RTO := 5000;
-      // read length with timeout
-      Ans.length := specialize Await<Word>(specialize AsyncReceive<Word>(Sock), RTO);
-      // Read all the bytes announced in Ans.Length
-      Await(AsyncReceive(Sock, @Ans.h, NToHs(Ans.length)));
-    except
-      // Prematurely closing connection
-      on E: EConnectionClosedException do
-        Exit;
-      // Timeout on receive
-      on E: EAwaitTimeoutException do
-        Exit;
-      // Other socket errors
-      on E: ESocketError do
-        Exit;
-    end;
-  finally
-    CloseSocket(Sock);
-  end;
-
-  // if the final check finds problems with the answer, we'll return false
-  // but AnsLen being >=0 will let the caller know that the server did
-  // respond, but either declined to answer or couldn't.
-  If not CheckAnswer(Qry.hpl.h,Ans.h) then
-    exit;
-  Result:=True;
-end;
-
-{
-Read a string from the payload buffer. Handles compressed as well as
-regular labels. On termination start points to the character after the
-end of the str.
-}
-
-function stringfromlabel(pl: TPayLoad; var start: Integer): string;
-var
-  l,i,n,lc: integer;
-  ptr: Word;
-  ptrseen: Boolean = False;
-begin
-  result := '';
-  l := 0;
-  i := 0;
-  n := start;
-  // Label counter. Per rfc1035, s. 3.1, each label is at least 2 bytes and the
-  // max length for a domain is 255, so there can't be more than 127 labels.
-  // This helps to short-circuit loops in label pointers.
-  lc := 0;
-  repeat
-    // each iteration of this loop is for one label. whether a pointer or a
-    // regular label, we need 2 bytes headroom minimum.
-    if n > (Length(pl) - 2) then break;
-    l := ord(pl[n]);
-    { compressed reply }
-    while (l >= 192) do
-      begin
-        if not ptrseen then start := n + 2;
-        ptrseen := True;
-        ptr := (l and not(192)) shl 8 + ord(pl[n+1]);
-        {ptr must point backward and be >= 12 (for the dns header.}
-        if (ptr >= (n+12)) or (ptr < 12) then l := 0 // l=0 causes loop to exit
-        else
-        begin
-          { the -12 is because of the reply header length. we do the decrement
-          here to avoid overflowing if ptr < 12.}
-          n := ptr - 12;
-          l := ord(pl[n]);
-        end;
-      end;
-    // check we point inside the buffer
-    if (n+l+1) > Length(pl) then l := 0;
-    if l <> 0 then begin
-      setlength(result,length(result)+l);
-      move(pl[n+1],result[i+1],l);
-      result := result + '.';
-      inc(n,l); inc(n);
-      inc(i,l); inc(i);
-      if n > start then start := n;
-    end;
-    Inc(lc); // label count
-  until (l = 0) or (lc > 127);
-  // per rfc1035, section 4.1.4, a domain name may be represented by
-  // either a sequence of labels followed by 0, or a pointer, or a series
-  // of labels followed by a pointer. If there's a pointer there's no 0 to
-  // skip over when calculating the final index.
-  if not ptrseen then Inc(start); // jump past the 0.
-  if (Length(result) > 0) and (result[length(result)] = '.') then
-    setlength(result,length(result)-1);
-end;
-
-function stringfromlabel(pl: TPayLoadTCP; var start: Integer): string;
-var
-  l,i,n,lc: integer;
-  ptr: Word;
-  ptrseen: Boolean = False;
-begin
-  result := '';
-  l := 0;
-  i := 0;
-  n := start;
-  // Label counter. Per rfc1035, s. 3.1, each label is at least 2 bytes and the
-  // max length for a domain is 255, so there can't be more than 127 labels.
-  // This helps to short-circuit loops in label pointers.
-  lc := 0;
-  repeat
-    // each iteration of this loop is for one label. whether a pointer or a
-    // regular label, we need 2 bytes headroom minimum.
-    if n > (Length(pl) - 2) then break;
-    l := ord(pl[n]);
-    { compressed reply }
-    while (l >= 192) do
-      begin
-        if not ptrseen then start := n + 2;
-        ptrseen := True;
-        ptr := (l and not(192)) shl 8 + ord(pl[n+1]);
-        {ptr must point backward and be >= 12 (for the dns header.}
-        if (ptr >= (n+12)) or (ptr < 12) then l := 0 // l=0 causes loop to exit
-        else
-        begin
-          { the -12 is because of the reply header length. we do the decrement
-          here to avoid overflowing if ptr < 12.}
-          n := ptr - 12;
-          l := ord(pl[n]);
-        end;
-      end;
-    // check we point inside the buffer
-    if (n+l+1) > Length(pl) then l := 0;
-    if l <> 0 then begin
-      setlength(result,length(result)+l);
-      move(pl[n+1],result[i+1],l);
-      result := result + '.';
-      inc(n,l); inc(n);
-      inc(i,l); inc(i);
-      if n > start then start := n;
-    end;
-    Inc(lc); // label count
-  until (l = 0) or (lc > 127);
-  // per rfc1035, section 4.1.4, a domain name may be represented by
-  // either a sequence of labels followed by 0, or a pointer, or a series
-  // of labels followed by a pointer. If there's a pointer there's no 0 to
-  // skip over when calculating the final index.
-  if not ptrseen then Inc(start); // jump past the 0.
-  if (Length(result) > 0) and (result[length(result)] = '.') then
-    setlength(result,length(result)-1);
-end;
-
-Function ResolveNameAt(Resolver : Integer; HostName : String; Var Addresses : Array of THostAddr; Recurse: Integer) : Integer;
-
-Var
-  Qry, Ans            : TQueryData;
-  MaxAnswer,I,QryLen,
-  AnsLen,AnsStart     : Longint;
-  RR                  : TRRData;
-  cname               : string;
-begin
-  Result:=0;
-  QryLen:=BuildPayLoad(Qry,HostName,DNSQRY_A,1);
-  If Not Query(Resolver,Qry,Ans,QryLen,AnsLen) then
-    Result:=-1
-  else
-    begin
-    AnsStart:=SkipAnsQueries(Ans,AnsLen);
-    MaxAnswer:=Ans.h.AnCount-1;
-    If MaxAnswer>High(Addresses) then
-      MaxAnswer:=High(Addresses);
-    I:=0;
-    While (I<=MaxAnswer) and NextRR(Ans.Payload,AnsStart,AnsLen,RR) do
-      begin
-      if htons(rr.AClass) = 1 then
-        case ntohs(rr.AType) of
-          DNSQRY_A: begin
-            Move(Ans.PayLoad[AnsStart],Addresses[i],SizeOf(THostAddr));
-            inc(Result);
-            Inc(AnsStart,htons(RR.RDLength));
-          end;
-          DNSQRY_CNAME: begin
-            if Recurse >= MaxRecursion then begin
-              Result := -1;
-              exit;
-            end;
-            rr.rdlength := ntohs(rr.rdlength);
-            setlength(cname, rr.rdlength);
-            cname := stringfromlabel(ans.payload, ansstart);
-            Result := ResolveNameAt(Resolver, cname, Addresses, Recurse+1);
-            exit; // FIXME: what about other servers?!
-          end;
-        end;
-        Inc(I);
-      end;
-    end;
-end;
-
-Function ResolveName(HostName : String; Var Addresses : Array of THostAddr) : Integer;
-
-Var
-  I : Integer;
-
-begin
-  CheckResolveFile;
-  I:=0;
-  Result:=0;
-  While (Result<=0) and (I<=high(DNSServers)) do
-    begin
-    Result:=ResolveNameAt(I,HostName,Addresses,0);
-    Inc(I);
-    end;
-end;
-
-//const NoAddress6 : array[0..7] of word = (0,0,0,0,0,0,0,0);
-
-Function ResolveNameAt6(Resolver : Integer; HostName : String; Var Addresses : Array of THostAddr6; Recurse: Integer) : Integer;
-
-Var
-  Qry, Ans            : TQueryData;
-  MaxAnswer,I,QryLen,
-  AnsLen,AnsStart     : Longint;
-  RR                  : TRRData;
-  cname               : string;
-  LIP4mapped: array[0..MaxIP4Mapped-1] of THostAddr;
-  LIP4count: Longint;
-
-begin
-  Result:=0;
-  QryLen:=BuildPayLoad(Qry,HostName,DNSQRY_AAAA,1);
-  If Not Query(Resolver,Qry,Ans,QryLen,AnsLen) then begin
-    // no answer? try IPv4 mapped addresses, maybe that will generate one
-    LIP4Count := ResolveName(HostName, LIP4Mapped);
-    if LIP4Count > 0 then begin
-      inc(LIP4Count); // we loop to LIP4Count-1 later
-      if LIP4Count > MaxIP4Mapped then LIP4Count := MaxIP4Mapped;
-      if LIP4Count > Length(Addresses) then LIP4Count := Length(Addresses);
-      for i := 0 to LIP4Count-2 do begin
-        Addresses[i] := NoAddress6;
-        Addresses[i].u6_addr16[5] := $FFFF;
-        Move(LIP4Mapped[i], Addresses[i].u6_addr16[6], 4);
-      end;
-      Result := LIP4Count;
-    end else begin
-      Result:=-1
-    end;
-  end else
-    begin
-    AnsStart:=SkipAnsQueries(Ans,AnsLen);
-    MaxAnswer:=Ans.h.AnCount-1;
-    If MaxAnswer>High(Addresses) then
-      MaxAnswer:=High(Addresses);
-    I:=0;
-    While (I<=MaxAnswer) and NextRR(Ans.Payload,AnsStart,AnsLen,RR) do
-      begin
-      if (1=NtoHS(RR.AClass)) then
-      case ntohs(rr.atype) of
-        DNSQRY_AAAA: begin
-            Move(Ans.PayLoad[AnsStart],Addresses[i],SizeOf(THostAddr6));
-            inc(Result);
-            rr.rdlength := ntohs(rr.rdlength);
-            Inc(AnsStart,RR.RDLength);
-          end;
-        DNSQRY_CNAME: begin
-          if Recurse >= MaxRecursion then begin
-            Result := -1;
-            exit;
-          end;
-          rr.rdlength := ntohs(rr.rdlength);
-          setlength(cname, rr.rdlength);
-          cname := stringfromlabel(ans.payload, ansstart);
-          Result := ResolveNameAt6(Resolver, cname, Addresses, Recurse+1);
-          exit; // FIXME: what about other servers?!
-        end;
-      end;
-      Inc(I);
-      end;
-    end;
-end;
-
-
-
-Function ResolveName6(HostName: String; Var Addresses: Array of THostAddr6) : Integer;
-var
-  i: Integer;
-begin
-  CheckResolveFile;
-  i := 0;
-  Result := 0;
-  while (Result <= 0) and (I<= high(DNSServers)) do begin
-    Result := ResolveNameAt6(I, Hostname, Addresses, 0);
-    Inc(i);
-  end;
-end;
-
-Function ResolveAddressAt(Resolver : Integer; Address : String; Var Names : Array of String; Recurse: Integer) : Integer;
-
-
-Var
-  Qry, Ans            : TQueryData;
-  MaxAnswer,I,QryLen,
-  AnsLen,AnsStart     : Longint;
-  RR                  : TRRData;
-
-begin
-  Result:=0;
-  QryLen:=BuildPayLoad(Qry,Address,DNSQRY_PTR,1);
-  If Not Query(Resolver,Qry,Ans,QryLen,AnsLen) then
-    Result:=-1
-  else
-    begin
-    AnsStart:=SkipAnsQueries(Ans,AnsLen);
-    MaxAnswer:=Ans.h.AnCount-1;
-    If MaxAnswer>High(Names) then
-      MaxAnswer:=High(Names);
-    I:=0;
-    While (I<=MaxAnswer) and NextRR(Ans.Payload,AnsStart,AnsLen,RR) do
-      begin
-      Case Ntohs(RR.AType) of
-        DNSQRY_PTR:
-          if (1=NtoHS(RR.AClass)) then
-            begin
-            Names[i]:=BuildName(Ans.Payload,AnsStart,AnsLen);
-            inc(Result);
-            RR.RDLength := ntohs(RR.RDLength);
-            Inc(AnsStart,RR.RDLength);
-            end;
-        DNSQRY_CNAME:
-          begin
-          if Recurse >= MaxRecursion then
-            begin
-            Result := -1;
-            exit;
-            end;
-          rr.rdlength := ntohs(rr.rdlength);
-          setlength(Address, rr.rdlength);
-          address := stringfromlabel(ans.payload, ansstart);
-          Result := ResolveAddressAt(Resolver, Address, Names, Recurse+1);
-          exit;
-          end;
-      end;
-      Inc(I);
-      end;
-    end;
-end;
-
-
-Function ResolveAddress(HostAddr : THostAddr; Var Addresses : Array of String) : Integer;
-
-Var
-  I : Integer;
-  S : String;
-  nt : tnetaddr;
-
-begin
-  CheckResolveFile;
-  I:=0;
-  Result:=0;
-  nt:=hosttonet(hostaddr);
-  S:=Format('%d.%d.%d.%d.in-addr.arpa',[nt.s_bytes[4],nt.s_bytes[3],nt.s_bytes[2],nt.s_bytes[1]]);
-  While (Result=0) and (I<=high(DNSServers)) do
-    begin
-    Result:=ResolveAddressAt(I,S,Addresses,1);
-    Inc(I);
-    end;
-end;
-
-Function ResolveAddress6(HostAddr : THostAddr6; Var Addresses : Array of String) : Integer;
-
-const
-  hexdig: string[16] = '0123456789abcdef';
-
-Var
-  I : Integer;
-  S : ShortString;
-
-begin
-  CheckResolveFile;
-  Result:=0;
-  S := '0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa';
-  for i := 7 downto 0 do begin
-    S[5+(7-i)*8] := hexdig[1+(HostAddr.u6_addr16[i] and $000F) shr 00];
-    S[7+(7-i)*8] := hexdig[1+(HostAddr.u6_addr16[i] and $00F0) shr 04];
-    S[1+(7-i)*8] := hexdig[1+(HostAddr.u6_addr16[i] and $0F00) shr 08];
-    S[3+(7-i)*8] := hexdig[1+(HostAddr.u6_addr16[i] and $F000) shr 12];
-  end;
-  I := 0;
-  While (Result=0) and (I<=high(DNSServers)) do
-    begin
-    Result:=ResolveAddressAt(I,S,Addresses,1);
-    Inc(I);
-    end;
-end;
-
-Function HandleAsFullyQualifiedName(const HostName: String) : Boolean;
-var
-  I,J : Integer;
-begin
-  Result := False;
-  J := 0;
-  for I := 1 to Length(HostName) do
-    if HostName[I] = '.' then
-      begin
-      Inc(J);
-      if J >= NDots then
-        begin
-        Result := True;
-        Break;
-        end;
-      end;
-end;
-
-Function ResolveHostByName(HostName : String; Var H : THostEntry) : Boolean;
-
-Var
-  Address : Array[1..MaxResolveAddr] of THostAddr;
-  AbsoluteQueryFirst : Boolean;
-  L : Integer;
-  K : Integer;
-
-begin
-  // Use domain or search-list to append to the searched hostname.
-  // When the amount of dots in hostname is higher or equal to ndots,
-  // do the query without adding any search-domain first.
-  // See the resolv.conf manual for more info.
-  if (DefaultDomainList<>'') then
-    begin
-    // Fill the cached DefaultDomainListArr and NDots
-    if (Length(DefaultDomainListArr) = 0) then
-      begin
-      DefaultDomainListArr := DefaultDomainList.Split(' ',Char(9));
-      L := Pos('ndots:', DNSOptions);
-      if L > 0 then
-        NDots := StrToIntDef(Trim(Copy(DNSOptions, L+6, 2)), 1);
-      end;
-
-    AbsoluteQueryFirst := HandleAsFullyQualifiedName(HostName);
-    if AbsoluteQueryFirst then
-      L:=ResolveName(HostName,Address)
-    else
-      L := -1;
-
-    K := 0;
-    while (L < 1) and (K < Length(DefaultDomainListArr)) do
-      begin
-      L:=ResolveName(HostName + '.' + DefaultDomainListArr[K],Address);
-      Inc(K);
-      end;
-    end
-  else
-    begin
-    AbsoluteQueryFirst := False;
-    L := -1;
-    end;
-
-  if (L<1) and not AbsoluteQueryFirst then
-    L:=ResolveName(HostName,Address);
-
-  Result:=(L>0);
-  If Result then
-    begin
-    // We could add a reverse call here to get the real name and aliases.
-    H.Name:=HostName;
-    H.Addr:=Address[1];
-    H.aliases:='';
-    end;
-end;
-
-Function ResolveHostByName6(HostName : String; Var H : THostEntry6) : Boolean;
-
-Var
-  Address : Array[1..MaxResolveAddr] of THostAddr6;
-  L : Integer;
-
-begin
-  L:=ResolveName6(HostName,Address);
-  Result:=(L>0);
-  If Result then
-    begin
-    // We could add a reverse call here to get the real name and aliases.
-    H.Name:=HostName;
-    H.Addr:=Address[1];
-    H.aliases:='';
-    end;
-end;
-
-
-Function ResolveHostByAddr(HostAddr : THostAddr; Var H : THostEntry) : Boolean;
-
-Var
-  Names : Array[1..MaxResolveAddr] of String;
-  I,L : Integer;
-
-begin
-  L:=ResolveAddress(HostAddr,Names);
-  Result:=(L>0);
-  If Result then
-    begin
-    H.Name:=Names[1];
-    H.Addr:=HostAddr;
-    H.Aliases:='';
-    If (L>1) then
-      For I:=2 to L do
-        If (I=2) then
-          H.Aliases:=Names[i]
-        else
-          H.Aliases:=H.Aliases+','+Names[i];
-    end;
-end;
-
-Function ResolveHostByAddr6(HostAddr : THostAddr6; Var H : THostEntry6) : Boolean;
-
-Var
-  Names : Array[1..MaxResolveAddr] of String;
-  I,L : Integer;
-
-begin
-  L:=ResolveAddress6(HostAddr,Names);
-  Result:=(L>0);
-  If Result then
-    begin
-    H.Name:=Names[1];
-    H.Addr:=HostAddr;
-    H.Aliases:='';
-    If (L>1) then
-      For I:=2 to L do
-        If (I=2) then
-          H.Aliases:=Names[i]
-        else
-          H.Aliases:=H.Aliases+','+Names[i];
-    end;
-end;
-
-
-
-
-//const NoAddress : in_addr = (s_addr: 0);
-
-Function GetHostByName(HostName: String;  Var H : THostEntry) : boolean;
-
-begin
-  Result:=FindHostEntryInHostsFile(HostName,NoAddress,H);
-end;
-
-
-Function GetHostByAddr(Addr: THostAddr;  Var H : THostEntry) : boolean;
-
-begin
-  Result:=FindHostEntryInHostsFile('',Addr,H);
-end;
-
-
-{ ---------------------------------------------------------------------
-    /etc/protocols handling.
-  ---------------------------------------------------------------------}
-
-Function GetNextProtoEntry(var F : Text; Var H : TProtocolEntry): boolean;
-
-Var
-  Line,S : String;
-  I      : integer;
-
-begin
-  Result:=False;
-  Repeat
-    ReadLn(F,Line);
-    StripComment(Line);
-    S:=NextWord(Line);
-    If (S<>'') then
-      begin
-        H.Name:=S;
-        S:=NextWord(Line);
-	i:=strtointdef(s,-1);
-        If (i<>-1) then
-          begin
-          H.number:=i;
-          Result:=True;
-          H.Aliases:='';
-          Repeat
-            S:=NextWord(line);
-            If (S<>'') then
-              If (H.Aliases='') then
-                H.Aliases:=S
-              else
-                H.Aliases:=H.Aliases+','+S;
-          until (S='');
-          end;
-      end;
-  until Result or EOF(F);
-end;
-
-Function FindProtoEntryInProtoFile(N: String; prot: integer; Var H : TProtocolEntry) : boolean;
-
-Var
-  F : Text;
-  HE : TProtocolEntry;
-
-begin
-  Result:=False;
-  If FileExists (EtcPath + SProtocolFile) then
-    begin
-    Assign (F, EtcPath + SProtocolFile);
-    {$push}{$i-}
-    Reset(F);
-    {$pop}
-    If (IOResult=0) then
-      begin
-      While Not Result and GetNextProtoEntry(F,HE) do
-        begin
-        If (N<>'') then
-          Result:=MatchNameOrAlias(N,HE.Name,HE.Aliases)
-        else
-          Result:=prot=he.number;
-        end;
-      Close(f);
-      If Result then
-        begin
-        H.Name:=HE.Name;
-        H.number:=he.number;
-        H.Aliases:=HE.Aliases;
-        end;
-      end;
-    end;
-end;
-
-Function GetProtocolByName(ProtoName: String;  Var H : TProtocolEntry) : boolean;
-
-begin
-  Result:=FindProtoEntryInProtoFile(ProtoName,0,H);
-end;
-
-
-Function GetProtocolByNumber(proto: Integer;  Var H : TProtocolEntry) : boolean;
-
-begin
-  Result:=FindProtoEntryInProtoFile('',Proto,H);
-end;
-
-{ ---------------------------------------------------------------------
-    /etc/networks handling
-  ---------------------------------------------------------------------}
-
-function StrTonetpartial( IP : AnsiString) : in_addr ;
-
-Var
-    Dummy : AnsiString;
-    I,j,k     : Longint;
-//    Temp : in_addr;
-
-begin
-  strtonetpartial.s_addr:=0;              //:=NoAddress;
-  i:=0; j:=0;
-  while (i<4) and (j=0) do
-   begin
-     J:=Pos('.',IP);
-     if j=0 then j:=length(ip)+1;
-     Dummy:=Copy(IP,1,J-1);
-     Delete (IP,1,J);
-     Val (Dummy,k,J);
-     if j=0 then
-      strtonetpartial.s_bytes[i+1]:=k;
-     inc(i);
-   end;
-   if (i=0) then strtonetpartial.s_addr:=0;
-end;
-
-Function GetNextNetworkEntry(var F : Text; Var N : TNetworkEntry): boolean;
-
-Var
-  NN,Line,S : String;
-  A : TNetAddr;
-
-begin
-  Result:=False;
-  Repeat
-    ReadLn(F,Line);
-    StripComment(Line);
-    S:=NextWord(Line);
-    If (S<>'') then
-      begin
-      NN:=S;
-      A:=StrTonetpartial(NextWord(Line));
-      Result:=(NN<>'') and (A.s_bytes[1]<>0); // Valid addr.
-      If result then
-        begin
-        N.Addr.s_addr:=A.s_addr; // keep it host.
-        N.Name:=NN;
-        N.Aliases:='';
-        end;
-      end;
-  until Result or EOF(F);
-end;
-
-Function FindNetworkEntryInNetworksFile(Net: String; Addr: TNetAddr; Var N : TNetworkEntry) : boolean;
-
-Var
-  F : Text;
-  NE : TNetworkEntry;
-
-begin
-  Result:=False;
-  If FileExists (EtcPath + SNetworksFile) then
-    begin
-    Assign (F, EtcPath + SNetworksFile);
-    {$push}{$i-}
-    Reset(F);
-    {$pop}
-    If (IOResult=0) then
-      begin
-      While Not Result and GetNextNetworkEntry(F,NE) do
-        begin
-        If (Net<>'') then
-          Result:=MatchNameOrAlias(Net,NE.Name,NE.Aliases)
-        else
-          Result:=Cardinal(Addr)=Cardinal(NE.Addr);
-        end;
-      Close(f);
-      If Result then
-        begin
-        N.Name:=NE.Name;
-        N.Addr:=nettohost(NE.Addr);
-        N.Aliases:=NE.Aliases;
-        end;
-      end;
-    end;
-end;
-
-Const NoNet : in_addr = (s_addr:0);
-
-Function GetNetworkByName(NetName: String; Var N : TNetworkEntry) : boolean;
-
-begin
-  Result:=FindNetworkEntryInNetworksFile(NetName,NoNet,N);
-end;
-
-Function GetNetworkByAddr(Addr: THostAddr; Var N : TNetworkEntry) : boolean;
-
-begin
-  Result:=FindNetworkEntryInNetworksFile('',Addr,N);
-end;
-
-{ ---------------------------------------------------------------------
-    /etc/services section
-  ---------------------------------------------------------------------}
-
-Function GetNextServiceEntry(Var F : Text; Var E : TServiceEntry) : Boolean;
-
-
-Var
-  Line,S : String;
-  P : INteger;
-
-begin
-  Result:=False;
-  Repeat
-    ReadLn(F,Line);
-    StripComment(Line);
-    S:=NextWord(Line);
-    If (S<>'') then
-      begin
-      E.Name:=S;
-      S:=NextWord(Line);
-      P:=Pos('/',S);
-      If (P<>0) then
-        begin
-        E.Port:=StrToIntDef(Copy(S,1,P-1),0);
-        If (E.Port<>0) then
-          begin
-          E.Protocol:=Copy(S,P+1,Length(S)-P);
-          Result:=length(E.Protocol)>0;
-          E.Aliases:='';
-          Repeat
-            S:=NextWord(Line);
-            If (S<>'') then
-              If (Length(E.Aliases)=0) then
-                E.aliases:=S
-              else
-                E.Aliases:=E.Aliases+','+S;
-          until (S='');
-          end;
-        end;
-      end;
-  until Result or EOF(F);
-end;
-
-
-Function FindServiceEntryInFile(Const Name,Proto : String; Port : Integer; Var E : TServiceEntry) : Boolean;
-
-Var
-  F : Text;
-  TE : TServiceEntry;
-
-begin
-  Result:=False;
-  If FileExists (EtcPath + SServicesFile) then
-    begin
-    Assign (F, EtcPath + SServicesFile);
-    {$push}{$i-}
-    Reset(F);
-    {$pop}
-    If (IOResult=0) then
-      begin
-      While Not Result and GetNextServiceEntry(F,TE) do
-        begin
-        If (Port=-1) then
-          Result:=MatchNameOrAlias(Name,TE.Name,TE.Aliases)
-        else
-          Result:=(Port=TE.Port);
-        If Result and (Proto<>'') then
-          Result:=(Proto=TE.Protocol);
-        end;
-      Close(f);
-      If Result then
-        begin
-        E.Name:=TE.Name;
-        E.Port:=TE.Port;
-        E.Protocol:=TE.Protocol;
-        E.Aliases:=TE.Aliases;
-        end;
-      end;
-    end;
-end;
-
-Function GetServiceByName(Const Name,Proto : String; Var E : TServiceEntry) : Boolean;
-
-begin
-  Result:=FindServiceEntryInFile(Name,Proto,-1,E);
-end;
-
-Function GetServiceByPort(Port : Word;Const Proto : String; Var E : TServiceEntry) : Boolean;
-
-begin
-  Result:=FindServiceEntryInFile('',Proto,Port,E);
-end;
-
-{ ---------------------------------------------------------------------
-    Initialization section
-  ---------------------------------------------------------------------}
-
-Procedure InitResolver;
-
-begin
-  TimeOutS :=5;
-  TimeOutMS:=0;
-  CheckHostsFileAge:=False;
-  {$IfDef Windows}
-  GetDNSServers;
-{$Else}
-{$IFDEF UNIX_ETC}
-  EtcPath := '/etc/';
-{$ELSE UNIX_ETC}
- {$IFDEF ETC_BY_ENV}
-  EtcPath := GetEnvironmentVariable ('ETC');
-  if (EtcPath <> '') and (EtcPath [Length (EtcPath)] <> DirectorySeparator) then
-   EtcPath := EtcPath + DirectorySeparator;
- {$ELSE ETC_BY_ENV}
-{$WARNING Support for finding /etc/ directory not implemented for this platform!}
-
- {$ENDIF ETC_BY_ENV}
-{$ENDIF UNIX_ETC}
-  If FileExists (EtcPath + SHostsFile) then
-    HostsList := ProcessHosts (EtcPath + SHostsFile);
-{$ifdef android}
-  CheckResolveFileAge:=True;
-  CheckResolveFile;
-{$else}
-  CheckResolveFileAge:=False;
-  If FileExists(EtcPath + SResolveFile) then
-    GetDNsservers(EtcPath + SResolveFile)
-{$endif android}
-{$IFDEF OS2}
-  else if FileExists(EtcPath + SResolveFile2) then
-    GetDNsservers(EtcPath + SResolveFile2)
-{$ENDIF OS2};
-{$EndIf Windows}
-end;
-
-Procedure DoneResolver;
-
-begin
-  FreeHostsList(HostsList);
-end;
+{$endif defined(android) | defined(windows)}
 
 { ---------------------------------------------------------------------
     Common routines
   ---------------------------------------------------------------------}
 
-function IN6_IS_ADDR_V4MAPPED(HostAddr: THostAddr6): boolean;
+function IN6_IS_ADDR_V4MAPPED(HostAddr: TIn6Addr): boolean;
 begin
   Result :=
    (HostAddr.u6_addr16[0] = 0) and
@@ -2630,8 +509,640 @@ begin
    (HostAddr.u6_addr16[5] = $FFFF);
 end;
 
-Initialization
-  InitResolver;
-Finalization
-  DoneResolver;
+function IsIPv4Mapped(const IPv6Addr: String): Boolean;
+begin
+  Result := IN6_IS_ADDR_V4MAPPED(StrToHostAddr6(IPv6Addr));
+end;
+
+{ TDNSResolveTask }
+
+procedure TDNSResolveTask.Execute;
+begin
+  FResult := Default(TDNSResolveResult);
+end;
+
+constructor TDNSResolveTask.Create(const AHostName: String;
+  const ADNSServers: TNetworkAddressArray; UseIPv6: Boolean; ATimeOut: Integer;
+  AAttempts: Integer; ARecursionDepth: Integer);
+begin
+  inherited Create();
+  FHostName := AHostName;
+  FDNSServers := ADNSServers;
+  FUseIPv6 := UseIPv6;
+  FTimeOut := ATimeOut;
+  FAttempts := AAttempts;
+  FRecursionDepth := ARecursionDepth;
+end;
+
+{ TConfFileDB }
+
+function TConfFileDB.ParseLine(const ALine: String): TTokenizedLine;
+const
+  ExtendSize = 3;
+var
+  Start: SizeInt;
+  Len: SizeInt;
+  TokenCount: SizeInt;
+  Token: String;
+begin
+  Result := Default(TTokenizedLine);
+  Start := 1;
+  Len := 0;
+  TokenCount := 0;
+  while Start + Len <= ALine.Length do
+    case ALine[Start + Len] of
+      #9, ' ':
+        if Len > 0 then // new token finished
+        begin
+          Token := Copy(ALine, Start, Len);
+          if Length(Result) >= TokenCount then
+            SetLength(Result, Length(Result) + ExtendSize);
+          Result[TokenCount] := Token;
+          Inc(TokenCount);
+          Start := Start + Len + 1;
+          Len := 0;
+        end
+        else // no new token just move cursor
+          Inc(Start);
+      '#': Break; // comment: end of line
+      otherwise Inc(len);
+    end;
+  // add final token
+  if Len > 0 then
+  begin
+    Token := Copy(ALine, Start, Len);
+    if Length(Result) >= TokenCount then
+      SetLength(Result, TokenCount + 1);
+    Result[TokenCount] := Token;
+    Inc(TokenCount);
+  end;
+  // Shrink to fit
+  SetLength(Result, TokenCount);
+end;
+
+procedure TConfFileDB.Update;
+var
+  ConfFile: TextFile;
+  ConfLine: String;
+  ParsedLine: TTokenizedLine;
+begin
+  // Check timestamp if we need to update
+  if FileAge(FFileName) < FLastRead then
+    Exit;
+  Assign(ConfFile, FFileName);
+  try
+    Reset(ConfFile);
+    // Read line  by line
+    while not EOF(ConfFile) do
+    begin
+      ReadLn(ConfFile, ConfLine);
+      // Tokenize
+      ParsedLine := ParseLine(ConfLine);
+      if Length(ParsedLine) = 0 then
+        Continue; // skip empty lines
+      // Call virtual method of child to handle line
+      ParseEntry(ParsedLine);
+    end;
+  finally
+    Close(ConfFile);
+  end;
+  FLastRead := DateTimeToFileDate(Now);
+end;
+
+constructor TConfFileDB.Create(const AFileName: String);
+begin
+  FFileName := AFileName;
+  FLastRead := 0;
+  InitCriticalSection(FLock);
+end;
+
+destructor TConfFileDB.Destroy;
+begin
+  DoneCriticalSection(FLock);
+  inherited Destroy;
+end;
+
+procedure TConfFileDB.BeginAccess;
+begin
+  EnterCriticalSection(FLock);
+  try
+    Update;
+  except
+    LeaveCriticalSection(FLock);
+    raise;
+  end;
+end;
+
+procedure TConfFileDB.EndAccess;
+begin
+  LeaveCriticalSection(FLock);
+end;
+
+{ TResolveDB }
+
+class constructor TResolveDB.InitStatics;
+begin
+  Singleton := TResolveDB.Create;
+end;
+
+class destructor TResolveDB.CleanupStatics;
+begin
+  Singleton.Free;
+end;
+
+class function TResolveDB.Instance: TResolveDB;
+begin
+  Result := Singleton;
+end;
+
+function TResolveDB.CountLabels(const AName: String): SizeInt;
+var
+  i: SizeInt;
+begin
+  Result := 1;
+  for i:=1 to Length(AName) do
+    if AName[i] = '.' then
+      Inc(Result);
+end;
+
+procedure TResolveDB.Update;
+begin
+  FSearchDomains.Clear;
+  FDNSServers.Clear;
+  FDNSTimeOut := DefaultDNSTimeout;
+  FAttempts := DefaultDNSTimeout;
+  FLabelThreshold := 2;
+  // no resolv file on windows and android
+  {$If defined(android) or defined(WINDOWS)}
+  if FDNSServers.Count = 0 then
+    GetDNSServers(FDNSServers);
+  {$Else}
+  inherited Update;
+  {$EndIf}
+end;
+
+procedure TResolveDB.ParseEntry(const ALine: TTokenizedLine);
+
+procedure ParseOptions;
+var
+  i: SizeInt;
+  SplitPoint: SizeInt;
+  CurrOpt, OptVal, OptName: String;
+begin
+  for i:=1 to Length(ALine) - 1 do
+  begin
+    CurrOpt := ALine[i];
+    SplitPoint := Pos(':', CurrOpt) - 1;
+    if SplitPoint < 0 then // unrecognized option
+      Continue;
+    OptName := CurrOpt.Substring(0, SplitPoint);
+    OptVal := CurrOpt.Substring(SplitPoint + 1);
+    case OptName of
+      'ndots': FLabelThreshold := OptVal.ToInteger + 1; // num labels = num dots + 1
+      'attempts': FAttempts := OptVal.ToInteger;
+      'timeout': FDNSTimeOut := OptVal.ToInteger * 1000; // secs to ms
+    end;
+  end;
+end;
+
+begin
+  // Parsing according to manual: https://linux.die.net/man/5/resolv.conf
+  if Length(ALine) < 2 then Exit;
+  case ALine[0].ToLower of
+  'nameserver': FDNSServers.Add(ALine[1]);
+  'domain': FSearchDomains.Add(ALine[1]);
+  'search': FSearchDomains.Add(ALine[1]);
+  'options': ParseOptions;
+  end;
+end;
+
+constructor TResolveDB.Create;
+begin
+  inherited Create(ETCPath + SResolveFile);
+  FDNSServers := TStringList.Create;
+  FSearchDomains := TStringList.Create;
+end;
+
+destructor TResolveDB.Destroy;
+begin
+  FDNSServers.Free;
+  FSearchDomains.Free;
+  inherited Destroy;
+end;
+
+function TResolveDB.GenerateResolutionNames(const ADomain: String): TResolveNames;
+var
+  i: SizeInt;
+  DirectResolve: Boolean;
+begin
+  Result := Default(TResolveNames);
+  SetLength(Result, FSearchDomains.Count + 1);
+  DirectResolve := CountLabels(ADomain) >= FLabelThreshold;
+  if DirectResolve then
+  begin
+    // Resolve the name first
+    Result[0] := ADomain;
+    for i := 1 to FSearchDomains.Count do
+      Result[i] := ADomain + '.' + FSearchDomains[i - 1];
+  end
+  else
+  begin
+    // Resolve searchdomains first
+    for i := 0 to FSearchDomains.Count - 1 do
+      Result[i] := ADomain + '.' + FSearchDomains[i];
+    // and this name last
+    Result[FSearchDomains.Count] := ADomain;
+  end;
+end;
+
+{ TServiceDB }
+
+class constructor TServiceDB.InitStatics;
+begin
+  Singleton := TServiceDB.Create;
+end;
+
+class destructor TServiceDB.CleanupStatics;
+begin
+  Singleton.Free;
+end;
+
+class function TServiceDB.Instance: TServiceDB;
+begin
+  Result := Singleton;
+end;
+
+procedure TServiceDB.Update;
+begin
+  FServices.Clear;
+  inherited Update;
+end;
+
+procedure TServiceDB.ParseEntry(const ALine: TTokenizedLine);
+var
+  Entry: TServiceEntry;
+  i: Integer;
+  PortProtoSeperator: SizeInt;
+begin
+  // Malformed line
+  if Length(ALine) < 2 then Exit;
+  Entry := Default(TServiceEntry);
+  Entry.Name := ALine[0];
+  PortProtoSeperator := Pos('/', ALine[1]) - 1;
+  if PortProtoSeperator < 0 then Exit;
+  Entry.Port := ALine[1].Substring(0, PortProtoSeperator).ToInteger;
+  Entry.Protocol := ALine[1].Substring(PortProtoSeperator + 1);
+  SetLength(Entry.Aliases, Length(ALine) - 2);
+  for i := 2 to Length(ALine) - 1 do
+    Entry.Aliases[i - 2] := ALine[i];
+  FServices.Add(Entry);
+end;
+
+constructor TServiceDB.Create;
+begin
+  inherited Create(ETCPath + SServicesFile);
+  FServices := TServiceList.Create;
+end;
+
+destructor TServiceDB.Destroy;
+begin
+  FServices.Free;
+  inherited Destroy;
+end;
+
+function TServiceDB.TryFindServices(const NameOrAlias: String): TServiceArray;
+var
+  i: SizeInt;
+  Entry: TServiceEntry;
+begin
+  Result := Default(TServiceArray);
+  for Entry in FServices do
+  begin
+    if Entry.Name = NameOrAlias then
+    begin
+      Result += [Entry];
+      Continue;
+    end;
+    for i:=0 to Length(Entry.Aliases) do
+      if Entry.Aliases[i] = NameOrAlias then
+      begin
+        Result += [Entry];
+        Break;
+      end;
+  end;
+end;
+
+function TServiceDB.TryFindService(APort: Word): TServiceArray;
+var
+  Entry: TServiceEntry;
+begin
+  Result := Default(TServiceArray);
+  for Entry in FServices do
+    if Entry.Port = APort then
+      Result += [Entry];
+end;
+
+function TServiceDB.GetService(const NameOrAlias: String): TServiceArray;
+begin
+  Result := TryFindServices(NameOrAlias);
+  if Length(Result) = 0 then
+    raise ENoSuchEntry.Create('No service named: ' + NameOrAlias);
+end;
+
+function TServiceDB.GetServiceByPort(APort: Word): TServiceArray;
+begin
+  Result := TryFindService(APort);
+  if Length(Result) = 0 then
+    raise ENoSuchEntry.Create('No service with port: ' + APort.ToString);
+end;
+
+{ THostsDB }
+
+class constructor THostsDB.InitStatics;
+begin
+  Singleton := THostsDB.Create;
+end;
+
+class destructor THostsDB.CleanupStatics;
+begin
+  Singleton.Free;
+end;
+
+class function THostsDB.Instance: THostsDB;
+begin
+  Result := Singleton;
+end;
+
+procedure THostsDB.Update;
+begin
+  FHosts.Clear;
+  inherited Update;
+end;
+
+procedure THostsDB.ParseEntry(const ALine: TTokenizedLine);
+var
+  Entry: THostEntry;
+  i: Integer;
+begin
+  // Malformed line
+  if Length(ALine) < 2 then Exit;
+  Entry := Default(THostEntry);
+  Entry.Addr := INAddr(ALine[0]);
+  Entry.Name := ALine[1];
+  SetLength(Entry.Aliases, Length(ALine) - 2);
+  for i := 2 to Length(ALine) - 1 do
+    Entry.Aliases[i - 2] := ALine[i];
+  FHosts.Add(Entry.Name, Entry);
+end;
+
+constructor THostsDB.Create;
+begin
+  inherited Create(ETCPath + SHostsFile);
+  FHosts := THostMap.Create;
+end;
+
+destructor THostsDB.Destroy;
+begin
+  FHosts.Free;
+  inherited Destroy;
+end;
+
+function THostsDB.TryFindHost(const NameOrAlias: String; out AEntry: THostEntry
+  ): Boolean;
+var
+  i: SizeInt;
+begin
+  Result := False;
+  if FHosts.TryGetValue(NameOrAlias, AEntry) then
+    Exit(True);
+  for AEntry in FHosts.Values do
+    for i:=0 to Length(AEntry.Aliases) do
+      if AEntry.Aliases[i] = NameOrAlias then
+        Exit(True);
+end;
+
+function THostsDB.TryFindHost(const HostAddress: TNetworkAddress; out
+  AEntry: THostEntry): Boolean;
+begin
+  Result := False;
+  for AEntry in FHosts.Values do
+    if AEntry.Addr = HostAddress then
+      Exit(True);
+end;
+
+function THostsDB.GetHost(const NameOrAlias: String): THostEntry;
+begin
+  if not TryFindHost(NameOrAlias, Result) then
+    raise ENoSuchEntry.Create('No host named: ' + NameOrAlias);
+end;
+
+function THostsDB.GetHosts: THostMap.TValueCollection;
+begin
+  Result := FHosts.Values;
+end;
+
+function THostsDB.GetHostByAddress(const HostAddress: TNetworkAddress
+  ): THostEntry;
+begin
+  if not TryFindHost(HostAddress, Result) then
+    raise ENoSuchEntry.Create('No host with address: ' + HostAddress.Address);
+end;
+
+{ TNetworksDB }
+
+class constructor TNetworksDB.InitStatics;
+begin
+  Singleton := TNetworksDB.Create;
+end;
+
+class destructor TNetworksDB.CleanupStatics;
+begin
+  Singleton.Free;
+end;
+
+class function TNetworksDB.Instance: TNetworksDB;
+begin
+  Result := Singleton;
+end;
+
+function TNetworksDB.CompleteNetworkAddress(const Addr: String): String;
+var
+  i, dots: SizeInt;
+begin
+  Result := Addr;
+  dots := 0;
+  for i:=1 to Addr.Length do
+    if Addr[i] = ':' then Exit // ipv6 copout
+    else if Addr[i] = '.' then
+      Inc(dots);
+  for i := dots to 2 do
+    Result += '.0';
+end;
+
+procedure TNetworksDB.Update;
+begin
+  FNetworks.Clear;
+  inherited Update;
+end;
+
+procedure TNetworksDB.ParseEntry(const ALine: TTokenizedLine);
+var
+  Entry: TNetworkEntry;
+  i: Integer;
+begin
+  // Malformed line
+  if Length(ALine) < 2 then Exit;
+  Entry := Default(TNetworkEntry);
+  Entry.Name := ALine[0];
+  Entry.Addr := INAddr(CompleteNetworkAddress(ALine[1]));
+  SetLength(Entry.Aliases, Length(ALine) - 2);
+  for i := 2 to Length(ALine) - 1 do
+    Entry.Aliases[i - 2] := ALine[i];
+  FNetworks.Add(Entry.Name, Entry);
+end;
+
+constructor TNetworksDB.Create;
+begin
+  inherited Create(ETCPath + SNetworksFile);
+  FNetworks := TNetworkMap.Create;
+end;
+
+destructor TNetworksDB.Destroy;
+begin
+  FNetworks.Free;
+  inherited Destroy;
+end;
+
+function TNetworksDB.TryFindNetwork(const NameOrAlias: String; out
+  AEntry: TNetworkEntry): Boolean;
+var
+  i: SizeInt;
+begin
+  Result := False;
+  if FNetworks.TryGetValue(NameOrAlias, AEntry) then
+    Exit(True);
+  for AEntry in FNetworks.Values do
+    for i:=0 to Length(AEntry.Aliases) do
+      if AEntry.Aliases[i] = NameOrAlias then
+        Exit(True);
+end;
+
+function TNetworksDB.TryFindNetwork(const NetworkAddress: TNetworkAddress; out
+  AEntry: TNetworkEntry): Boolean;
+begin
+  Result := False;
+  for AEntry in FNetworks.Values do
+    if AEntry.Addr = NetworkAddress then
+      Exit(True);
+end;
+
+function TNetworksDB.GetNetwork(const NameOrAlias: String): TNetworkEntry;
+begin
+  if not TryFindNetwork(NameOrAlias, Result) then
+    raise ENoSuchEntry.Create('No netwrok named: ' + NameOrAlias);
+end;
+
+function TNetworksDB.GetNetworkByAddress(const NetworkAddress: TNetworkAddress
+  ): TNetworkEntry;
+begin
+  if not TryFindNetwork(NetworkAddress, Result) then
+    raise ENoSuchEntry.Create('No netwrok with address: ' + NetworkAddress.Address);
+end;
+
+function TNetworksDB.GetNetworks: TNetworkMap.TValueCollection;
+begin
+  Result := FNetworks.Values;
+end;
+
+{ TProtocolDB }
+
+class constructor TProtocolDB.InitStatics;
+begin
+  Singleton := TProtocolDB.Create;
+end;
+
+class destructor TProtocolDB.CleanupStatics;
+begin
+  Singleton.Free;
+end;
+
+class function TProtocolDB.Instance: TProtocolDB;
+begin
+  Result := Singleton;
+end;
+
+procedure TProtocolDB.Update;
+begin
+  FProtocols.Clear;
+  inherited Update;
+end;
+
+procedure TProtocolDB.ParseEntry(const ALine: TTokenizedLine);
+var
+  Entry: TProtocolEntry;
+  i: Integer;
+begin
+  // Malformed line
+  if Length(ALine) < 2 then Exit;
+  Entry := Default(TProtocolEntry);
+  Entry.Name := ALine[0];
+  Entry.Number := ALine[1].ToInteger;
+  SetLength(Entry.Aliases, Length(ALine) - 2);
+  for i := 2 to Length(ALine) - 1 do
+    Entry.Aliases[i - 2] := ALine[i];
+  FProtocols.Add(Entry.Name, Entry);
+end;
+
+constructor TProtocolDB.Create;
+begin
+  inherited Create(ETCPath + SProtocolFile);
+  FProtocols := TProtocolMap.Create;
+end;
+
+destructor TProtocolDB.Destroy;
+begin
+  FProtocols.Free;;
+  inherited Destroy;
+end;
+
+function TProtocolDB.TryFindProtocol(const NameOrAlias: String; out
+  AEntry: TProtocolEntry): Boolean;
+var
+  i: SizeInt;
+begin
+  Result := False;
+  if FProtocols.TryGetValue(NameOrAlias, AEntry) then
+    Exit(True);
+  for AEntry in FProtocols.Values do
+    for i:=0 to Length(AEntry.Aliases) do
+      if AEntry.Aliases[i] = NameOrAlias then
+        Exit(True);
+end;
+
+function TProtocolDB.TryFindProtocol(Number: Integer; out AEntry: TProtocolEntry
+  ): Boolean;
+begin
+  Result := False;
+  for AEntry in FProtocols.Values do
+    if AEntry.Number = Number then
+      Exit(True);
+end;
+
+function TProtocolDB.GetProtocol(const NameOrAlias: String): TProtocolEntry;
+begin
+  if not TryFindProtocol(NameOrAlias, Result) then
+    raise ENoSuchEntry.Create('No protocol named: ' + NameOrAlias);
+end;
+
+function TProtocolDB.GetProtocolByNumber(Number: Integer): TProtocolEntry;
+begin
+  if not TryFindProtocol(Number, Result) then
+    raise ENoSuchEntry.Create('No protocol numbered: ' + Number.ToString);
+end;
+
+function TProtocolDB.GetProtocols: TProtocolMap.TValueCollection;
+begin
+  Result := FProtocols.Values;
+end;
+
 end.

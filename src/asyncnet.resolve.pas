@@ -309,11 +309,11 @@ begin
   Result:=Inherited NameLookup(S);
   If Result then
     begin
-    Result:=GetHostByName(S,H);
+    //Result:=GetHostByName(S,H);
     if not Result then
-      Result:=ResolveHostByName(S,H)
+      //Result:=ResolveHostByName(S,H)
     else
-      H.Addr:=HostToNet(H.Addr);    
+      H.Addr:=H.Addr;
     If Result then
       SaveHostEntry(@H);
     end;
@@ -326,7 +326,7 @@ Var
 
 begin
   ClearData;
-  Result:=ResolveHostByAddr(Address,H);
+  //Result:=ResolveHostByAddr(Address,H);
   If Result then
     SaveHostEntry(@H);
 end;
@@ -340,11 +340,11 @@ Var
 begin
   PH:=ENtry;
   FName:=PH^.Name;
-  FHostAddress:=NetToHost(PH^.Addr);
+  //FHostAddress:=NetToHost(PH^.Addr);
   FAddressCount:=1;
   GetMem(FAddresses,SizeOf(THostAddr));
-  FAddresses[0]:=NetToHost(PH^.Addr);
-  FAliases.CommaText:=PH^.Aliases;
+  //FAddresses[0]:=NetToHost(PH^.Addr);
+  //FAliases.CommaText:=PH^.Aliases;
 end;
 
 Function THostResolver.GetNetAddress (Index : Integer) : THostAddr;
@@ -371,7 +371,7 @@ Var
 
 begin
   ClearData;
-  Result:=GetNetworkByAddr(Address,N);
+  //Result:=GetNetworkByAddr(Address,N);
   If Result then
     SaveNetEntry(@N);
 end;
@@ -385,7 +385,7 @@ begin
   Result:=Inherited NameLookup(S);
   If Result then
     begin
-    Result:=GetNetworkByName(S,N);
+    //Result:=GetNetworkByName(S,N);
     If Result then
       SaveNetEntry(@N);
     end;
@@ -399,8 +399,8 @@ Var
 begin
   PN:=ENtry;
   FName:=PN^.Name;
-  FNetAddress:=NetToHost(PN^.Addr);
-  FAliases.CommaText:=PN^.Aliases;
+  //FNetAddress:=NetToHost(PN^.Addr);
+  //FAliases.CommaText:=PN^.Aliases;
 end;
 
 Function TNetResolver.AddressLookup(Const S : String) : Boolean;
@@ -448,7 +448,7 @@ Var
 
 begin
   ClearData;
-  Result:=GetServiceByName(S,Proto,E);
+  //Result:=GetServiceByName(S,Proto,E);
   If Result then
     SaveServiceEntry(@E);
 end;
@@ -460,7 +460,7 @@ Var
 
 begin
   ClearData;
-  Result:=GetServiceByPort(APort,Proto,E);
+  //Result:=GetServiceByPort(APort,Proto,E);
   If Result then
     SaveServiceEntry(@E);
 end;
@@ -475,7 +475,7 @@ begin
   FName:=PE^.Name;
   FPort:=PE^.Port;
   FProtocol:=PE^.Protocol;
-  FAliases.CommaText:=PE^.Aliases;
+  //FAliases.CommaText:=PE^.Aliases;
 end;
 
 Procedure TServiceResolver.ClearData;
@@ -489,7 +489,7 @@ end;
 Function TServiceResolver.GetNetPort : Integer;
 
 begin
-  Result:=ShortHostToNet(FPort);
+  //Result:=ShortHostToNet(FPort);
 end;
 
 { ---------------------------------------------------------------------
