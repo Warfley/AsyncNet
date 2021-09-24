@@ -413,11 +413,28 @@ end;
 procedure FillAddr(const AHost: String; APort: Integer; Addr: Pointer);
 begin
   psockaddr_in(Addr)^.sin_family := AF_INET;
-  psockaddr_in(Addr)^.sin_port := ShortHostToNet(APort);
+  psockaddr_in(Addr)^.sin_port := HToNS(APort);
   psockaddr_in(Addr)^.sin_addr.s_addr := LongWord(StrToNetAddr(AHost));
 end;
 
-procedure WaitForHandshake(ATask: TTask; ASocket: Tsocket); inline;
+procedure WaitForHandshake(ATask: TTask; ASocket: Tsocket); //inline;
+{$IfDef WINDOWS}
+var
+  Success, err: Integer;
+begin
+  repeat
+    Success := fprecv(ASocket, @Success, 0, 0);
+    if Success < 0 then
+    begin
+      err := socketerror;
+      if err = EsockENOTCONN then
+        ATask.Sleep(SocketSleepingTime)
+      else if not WasBlockingError(err) then
+        raise ESocketError.Create(err, 'select');
+    end;
+  until Success = 0;
+end;
+{$Else}
 var
   success, err: LongInt;
   // long enough for any kind of address
@@ -437,6 +454,7 @@ begin
     end;
   until success = 0;
 end;
+{$EndIf}
 
 function WaitingRecvFrom(AExecution: TExecutable; ASocket: TSocket;
   Buffer: Pointer; BuffLen: SizeInt; Flags: Integer; Address: Pointer;
@@ -592,7 +610,7 @@ begin
   {$EndIf}
   addrLen^ := SizeOf(sockaddr);
   dataLen := WaitingRecvFrom(Self, FSocket, @FResult.Data, SizeOf(T), 0, addr, addrLen);
-  FResult.Port := ShortNetToHost(addr^.sin_port);
+  FResult.Port := NToHS(addr^.sin_port);
   FResult.Address := NetAddrToStr(addr^.sin_addr);
   if dataLen < SizeOf(T) then
     raise EUDPFragmentationException.Create('Receiving of fragmented data is not supported by typed receive');
@@ -635,7 +653,7 @@ begin
   addrLen^ := SizeOf(sockaddr);
   dataLen := WaitingRecvFrom(Self, FSocket, PChar(FResult.Data), FMaxLength, 0, addr, addrLen);
   SetLength(FResult.Data, dataLen);
-  FResult.Port := ShortNetToHost(addr^.sin_port);
+  FResult.Port := NToHS(addr^.sin_port);
   FResult.Address := NetAddrToStr(addr^.sin_addr);
   {$IfDef WINDOWS}
   finally
@@ -678,7 +696,7 @@ begin
   addrLen^ := SizeOf(sockaddr);
   dataLen := WaitingRecvFrom(Self, FSocket, @FResult.Data[0], FMaxCount * SizeOf(T), 0, addr, addrLen);
   SetLength(FResult.Data, dataLen div SizeOf(T));
-  FResult.Port := ShortNetToHost(addr^.sin_port);
+  FResult.Port := NToHS(addr^.sin_port);
   FResult.Address := NetAddrToStr(addr^.sin_addr);
   if dataLen mod SizeOf(T) > 0 then
     raise EUDPFragmentationException.Create('Receiving of fragmented data is not supported by typed receive');
@@ -719,7 +737,7 @@ begin
   {$EndIf}
   addrLen^ := SizeOf(sockaddr);
   FResult.Size := WaitingRecvFrom(Self, FSocket, FBuffer, FBufferLen, 0, addr, addrLen);
-  FResult.Port := ShortNetToHost(addr^.sin_port);
+  FResult.Port := NToHS(addr^.sin_port);
   FResult.Address := NetAddrToStr(addr^.sin_addr);
   {$IfDef WINDOWS}
   finally
@@ -816,7 +834,7 @@ begin
   OldState := SetNonBlocking(FSocket);
   try
     addr.sin_family := AF_INET;
-    addr.sin_port := ShortHostToNet(FPort);
+    addr.sin_port := HToNS(FPort);
     addr.sin_addr.s_addr := LongWord(StrToNetAddr(FHost));
     success := fpconnect(FSocket, @addr, SizeOf(addr));
     if success <> 0 then
@@ -870,7 +888,7 @@ begin
   end;
   FResult.Connection := Conn;
   FResult.PeerAddress := NetAddrToStr(addr.sin_addr);
-  FResult.PeerPort := ShortNetToHost(addr.sin_port);
+  FResult.PeerPort := NToHS(addr.sin_port);
 end;
 
 constructor TAcceptTask.Create(AServerSocket: Tsocket);

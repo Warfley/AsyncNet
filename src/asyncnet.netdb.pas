@@ -308,7 +308,7 @@ type
 
   { TDNSResolveTask }
 
-  TDNSResolveTask = class(specialize TRVTask<TNetworkAddressArray>)
+  TDNSResolveTask = class(specialize TRVTask<TDNSResolveResult>)
   private
     FHostName: String;
     FDNSServers: TNetworkAddressArray;
@@ -321,7 +321,7 @@ type
   public
     constructor Create(const AHostName: String; const ADNSServers: TNetworkAddressArray;
                        UseIPv6: Boolean = False; ATimeOut: Integer = DefaultDNSTimeout;
-                       AAttempts: Integer = DefaultAttempts;
+                       AAttempts: Integer = DefaultDNSAttempts;
                        ARecursionDepth: Integer = DefaultDNSRecursionDepth);
   end;
 
