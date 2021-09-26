@@ -39,6 +39,9 @@ uses SysUtils, Classes, Generics.Collections, Sockets, stax;
 
 type
   ENoSuchEntry = class(Exception);
+  ENoDNSServer = class(Exception);
+  EQueryUnseccesfull = class(Exception);
+  EMaxRecursionDepthExceeded = class(Exception);
 
 Const
   MaxResolveAddr = 10;
@@ -88,7 +91,7 @@ type
 
   THostEntry = record
     Name : String;
-    Addr : TNetworkAddress;
+    Addresses : TNetworkAddressArray;
     Aliases : array of String;
   end;
   THostMap = specialize TDictionary<String, THostEntry>;
@@ -303,7 +306,7 @@ type
 
   TDNSResolveResult = record
     Address: TNetworkAddress;
-    TimeOut: QWord;
+    TTL: QWord;
   end;
 
   { TDNSResolveTask }
@@ -311,19 +314,39 @@ type
   TDNSResolveTask = class(specialize TRVTask<TDNSResolveResult>)
   private
     FHostName: String;
-    FDNSServers: TNetworkAddressArray;
+    FDNSServer: TNetworkAddress;
     FTimeOut: Integer;
-    FAttempts: Integer;
-    FUseIPv6: Boolean;
+    FAddressType: TAddressType;
     FRecursionDepth: Integer;
   protected
     procedure Execute; override;
   public
-    constructor Create(const AHostName: String; const ADNSServers: TNetworkAddressArray;
-                       UseIPv6: Boolean = False; ATimeOut: Integer = DefaultDNSTimeout;
-                       AAttempts: Integer = DefaultDNSAttempts;
+    constructor Create(const AHostName: String; const ADNSServer: TNetworkAddress;
+                       AddressType: TAddressType = atIN4; ATimeOut: Integer = DefaultDNSTimeout;
                        ARecursionDepth: Integer = DefaultDNSRecursionDepth);
   end;
+
+  { TResolveNameTask }
+
+  TResolveNameTask = class(specialize TRVTask<TDNSResolveResult>)
+  private
+    FHostName: String;
+    FPreferredType: TAddressType;
+
+    function ResolveHostsDB(const AHostNames: TStringArray): Boolean;
+    function ResolveDNS(const AHostNames: TStringArray; DNSServers: TStringList;
+                        Timeout: QWord; Attempts: Integer): Boolean;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(const AHostName: String; APreferredType: TAddressType = atIN4);
+  end;
+
+// Async functions
+function AsyncDNSResolve(const AHostName: String; const ADNSServer: TNetworkAddress;
+                       AAddressType: TAddressType = atIN4; ATimeOut: Integer = DefaultDNSTimeout;
+                       ARecursionDepth: Integer = DefaultDNSRecursionDepth): TDNSResolveTask; inline;
+function AsyncResolveName(const AHostName: String; PreferredType: TAddressType = atIN4): TResolveNameTask; inline;
 
 // easy singleton access
 function ResolveDB: TResolveDB; inline;
@@ -344,7 +367,7 @@ operator =(const A, B: TNetworkAddress): Boolean; inline;
 function IN6_IS_ADDR_V4MAPPED(HostAddr: TIn6Addr): boolean;
 function IsIPv4Mapped(const IPv6Addr: String): Boolean; inline;
 implementation
-uses asyncnet.sockets {$IfDef WINDOWS}, JwaIpTypes, JwaIpHlpApi, windows{$EndIf};
+uses asyncnet.sockets, AsyncNet.dns, AsyncNet.dns.resrecords {$IfDef WINDOWS}, JwaIpTypes, JwaIpHlpApi, windows{$EndIf};
 
 function ETCPath: String; inline;
 begin
@@ -362,6 +385,19 @@ begin
  {$Else}
  {$WARNING Support for finding /etc/ directory not implemented for this platform!}
  {$EndIf}
+end;
+
+function AsyncDNSResolve(const AHostName: String;
+  const ADNSServer: TNetworkAddress; AAddressType: TAddressType;
+  ATimeOut: Integer; ARecursionDepth: Integer): TDNSResolveTask;
+begin
+  Result := TDNSResolveTask.Create(AHostName, ADNSServer, AAddressType, ATimeOut, ARecursionDepth);
+end;
+
+function AsyncResolveName(const AHostName: String; PreferredType: TAddressType
+  ): TResolveNameTask;
+begin
+  Result := TResolveNameTask.Create(AHostName, PreferredType);
 end;
 
 function ResolveDB: TResolveDB;
@@ -517,20 +553,187 @@ end;
 { TDNSResolveTask }
 
 procedure TDNSResolveTask.Execute;
+var
+  Resp: TDNSResponse;
+  Questions: TDNSQuestionArray;
+  Start, TimeTaken, TTL: QWord;
 begin
   FResult := Default(TDNSResolveResult);
+
+  // Error checking
+  if FRecursionDepth <= 0 then
+    raise EMaxRecursionDepthExceeded.Create('CNAME chain length exceeded maximum recursion depth');
+
+  // DNS query
+  Questions := Default(TDNSQuestionArray);
+  SetLength(Questions, 1);
+  if (FAddressType = atIN6) then
+    Questions[0] := DNSQuestion(FHostName, rrtAAAA)
+  else
+    Questions[0] := DNSQuestion(FHostName, rrtA);
+
+  start := GetTickCount64;
+  Resp := specialize Await<TDNSResponse>(AsyncDNSRequest(FDNSServer.Address,
+                                                         Questions, FTimeOut));
+  TimeTaken := GetTickCount64 - Start;
+
+  // Parse result
+  if (FAddressType = atIN6) and (Length(Resp.Answers.AAAARecords) > 0) then
+  begin
+    FResult.Address := IN6Address(HostAddrToStr6(Resp.Answers.AAAARecords[0].Data));
+    FResult.TTL := Resp.Answers.AAAARecords[0].TTL;
+  end
+  else if (FAddressType = atIN4) and (Length(Resp.Answers.ARecords) > 0) then
+  begin
+    FResult.Address := IN4Address(HostAddrToStr(Resp.Answers.ARecords[0].Data));
+    FResult.TTL := Resp.Answers.ARecords[0].TTL;
+  end
+  else if Length(Resp.Answers.CNAMERecords) > 0 then
+  begin
+    TTL := Resp.Answers.CNAMERecords[0].TTL;
+    FResult := specialize Await<TDNSResolveResult>(TDNSResolveTask.Create(Resp.Answers.CNAMERecords[0].Data,
+                                                  FDNSServer, FAddressType, FTimeOut - TimeTaken,
+                                                  FRecursionDepth - 1));
+    // The TTL of the query result is the minimum of the cname chain
+    if FResult.TTL > TTL then
+      FResult.TTL := TTL;
+  end
+  else
+    raise EQueryUnseccesfull.Create('Unable to resolve "' + FHostName + '" at "' + FDNSServer.Address+ '"');
+end;
+
+{ TResolveNameTask }
+
+function TResolveNameTask.ResolveHostsDB(const AHostNames: TStringArray
+  ): Boolean;
+var
+  HostName: String;
+  Entry: THostEntry;
+  Addr: TNetworkAddress;
+begin
+  Result := False;
+  HostsDB.BeginAccess;
+  try
+    for HostName in AHostNames do
+      if HostsDB.TryFindHost(HostName, Entry) then
+      begin
+        FResult.Address := Entry.Addresses[0];
+        for Addr in Entry.Addresses do
+          if Addr.AddressType = FPreferredType then
+          begin
+            FResult.Address := Addr;
+            Break;
+          end;
+        FResult.TTL := QWord.MaxValue;
+        Exit(True);
+      end;
+  finally
+    HostsDB.EndAccess;
+  end;
+end;
+
+function TResolveNameTask.ResolveDNS(const AHostNames: TStringArray;
+  DNSServers: TStringList; Timeout: QWord; Attempts: Integer): Boolean;
+var
+  ServerIndex: Integer;
+  HostName: String;
+  OtherType: TAddressType;
+  DNSServer: TNetworkAddress;
+begin
+  Result := False;
+  ServerIndex := 0;
+  // try Attempts many times
+  while (Attempts > 0) and not Result do
+  begin
+    DNSServer := INAddr(DNSServers[ServerIndex]);
+    // Try each of the hostnames
+    for HostName in AHostNames do
+    begin
+      // first try preferred
+      try
+        FResult := specialize Await<TDNSResolveResult>(AsyncDNSResolve(HostName,
+                                                                       DNSServer,
+                                                                       FPreferredType,
+                                                                       Timeout));
+        // No exception: successful attempt
+        Result := True;
+        Break;
+      except
+        on E: ETaskTerminatedException do
+          raise E; // if terminated kill by re-raising
+        on E: Exception do; // Ignore all other exceptions
+      end;
+      // Preferred type not found, search the other type
+      if FPreferredType = atIN4 then
+        OtherType := atIN6
+      else
+        OtherType := atIN4;
+      try
+        FResult := specialize Await<TDNSResolveResult>(AsyncDNSResolve(HostName,
+                                                                       DNSServer,
+                                                                       OtherType,
+                                                                       Timeout)); // No exception: successful attempt
+        Result := True;
+        Break;
+      except
+        on E: ETaskTerminatedException do
+          raise E; // if terminated kill by re-raising
+        on E: Exception do; // Ignore all other exceptions
+      end;
+    end;
+    // None found/failures: retry on new server
+    Dec(Attempts);
+    ServerIndex := (ServerIndex + 1) mod DNSServers.Count;
+  end;
+end;
+
+procedure TResolveNameTask.Execute;
+var
+  Attempts, Timeout: Integer;
+  DNSServers: TStringList;
+  HostNames: TStringArray;
+begin
+  FResult := Default(TDNSResolveResult);
+  DNSServers := TStringList.Create;
+  try
+    // Retrieving parameter from ResolveDB
+    ResolveDB.BeginAccess;
+    try
+      DNSServers.AddStrings(ResolveDB.DNSServers);
+      Timeout := ResolveDB.DNSTimeOut;
+      Attempts := ResolveDB.Attempts;
+      HostNames := ResolveDB.ResolutionNames[FHostName];
+    finally
+      ResolveDB.EndAccess;
+    end;
+    // First try to resolve from hosts file
+    if ResolveHostsDB(HostNames) then
+      Exit;
+    // If not found resolve using DNS
+    if not ResolveDNS(HostNames, DNSServers, Timeout, Attempts) then
+      raise ENoSuchEntry.Create('Unable resolve ' + FHostName);
+  finally
+    DNSServers.Free;
+  end;
+end;
+
+constructor TResolveNameTask.Create(const AHostName: String;
+  APreferredType: TAddressType);
+begin
+  inherited Create;
+  FHostName := AHostName;
+  FPreferredType := APreferredType;
 end;
 
 constructor TDNSResolveTask.Create(const AHostName: String;
-  const ADNSServers: TNetworkAddressArray; UseIPv6: Boolean; ATimeOut: Integer;
-  AAttempts: Integer; ARecursionDepth: Integer);
+  const ADNSServer: TNetworkAddress; AddressType: TAddressType;
+  ATimeOut: Integer; ARecursionDepth: Integer);
 begin
-  inherited Create();
+  inherited Create;
   FHostName := AHostName;
-  FDNSServers := ADNSServers;
-  FUseIPv6 := UseIPv6;
+  FDNSServer := ADNSServer;
+  FAddressType := AddressType;
   FTimeOut := ATimeOut;
-  FAttempts := AAttempts;
   FRecursionDepth := ARecursionDepth;
 end;
 
@@ -586,9 +789,6 @@ var
   ConfLine: String;
   ParsedLine: TTokenizedLine;
 begin
-  // Check timestamp if we need to update
-  if FileAge(FFileName) < FLastRead then
-    Exit;
   Assign(ConfFile, FFileName);
   try
     Reset(ConfFile);
@@ -626,7 +826,9 @@ procedure TConfFileDB.BeginAccess;
 begin
   EnterCriticalSection(FLock);
   try
-    Update;
+    // Check timestamp if we need to update
+    if FileExists(FFileName) and (FileAge(FFileName) >= FLastRead) then
+      Update;
   except
     LeaveCriticalSection(FLock);
     raise;
@@ -721,6 +923,9 @@ begin
   inherited Create(ETCPath + SResolveFile);
   FDNSServers := TStringList.Create;
   FSearchDomains := TStringList.Create;
+  {$If defined(WINDOWS) or defined(android)}
+  Update;
+  {$EndIf}
 end;
 
 destructor TResolveDB.Destroy;
@@ -883,16 +1088,19 @@ procedure THostsDB.ParseEntry(const ALine: TTokenizedLine);
 var
   Entry: THostEntry;
   i: Integer;
+  PrevAliasLen: SizeInt;
 begin
   // Malformed line
   if Length(ALine) < 2 then Exit;
-  Entry := Default(THostEntry);
-  Entry.Addr := INAddr(ALine[0]);
+  if not FHosts.TryGetValue(ALine[1], Entry) then
+    Entry := Default(THostEntry);
+  Entry.Addresses += [INAddr(ALine[0])];
   Entry.Name := ALine[1];
-  SetLength(Entry.Aliases, Length(ALine) - 2);
+  PrevAliasLen := Length(Entry.Aliases);
+  SetLength(Entry.Aliases, PrevAliasLen + Length(ALine) - 2);
   for i := 2 to Length(ALine) - 1 do
-    Entry.Aliases[i - 2] := ALine[i];
-  FHosts.Add(Entry.Name, Entry);
+    Entry.Aliases[PrevAliasLen + i - 2] := ALine[i];
+  FHosts.AddOrSetValue(Entry.Name, Entry);
 end;
 
 constructor THostsDB.Create;
@@ -916,18 +1124,21 @@ begin
   if FHosts.TryGetValue(NameOrAlias, AEntry) then
     Exit(True);
   for AEntry in FHosts.Values do
-    for i:=0 to Length(AEntry.Aliases) do
+    for i:=0 to Length(AEntry.Aliases) - 1 do
       if AEntry.Aliases[i] = NameOrAlias then
         Exit(True);
 end;
 
 function THostsDB.TryFindHost(const HostAddress: TNetworkAddress; out
   AEntry: THostEntry): Boolean;
+var
+  Addr: TNetworkAddress;
 begin
   Result := False;
   for AEntry in FHosts.Values do
-    if AEntry.Addr = HostAddress then
-      Exit(True);
+    for Addr in AEntry.Addresses do
+      if Addr = HostAddress then
+        Exit(True);
 end;
 
 function THostsDB.GetHost(const NameOrAlias: String): THostEntry;
@@ -1022,7 +1233,7 @@ begin
   if FNetworks.TryGetValue(NameOrAlias, AEntry) then
     Exit(True);
   for AEntry in FNetworks.Values do
-    for i:=0 to Length(AEntry.Aliases) do
+    for i:=0 to Length(AEntry.Aliases) - 1 do
       if AEntry.Aliases[i] = NameOrAlias then
         Exit(True);
 end;
@@ -1114,7 +1325,7 @@ begin
   if FProtocols.TryGetValue(NameOrAlias, AEntry) then
     Exit(True);
   for AEntry in FProtocols.Values do
-    for i:=0 to Length(AEntry.Aliases) do
+    for i:=0 to Length(AEntry.Aliases) - 1 do
       if AEntry.Aliases[i] = NameOrAlias then
         Exit(True);
 end;

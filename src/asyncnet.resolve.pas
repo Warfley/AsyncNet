@@ -313,7 +313,7 @@ begin
     if not Result then
       //Result:=ResolveHostByName(S,H)
     else
-      H.Addr:=H.Addr;
+      ;//H.Addr:=H.Addr;
     If Result then
       SaveHostEntry(@H);
     end;

@@ -1,82 +1,75 @@
-{
-    This file is part of the Free Pascal run time library.
-    Copyright (c) 2003 by the Free Pascal development team
-
-    test netdb unit, host part
-
-    See the file COPYING.FPC, included in this distribution,
-    for details about the copyright.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
- **********************************************************************}
-{$mode objfpc}
-{$h+}
-
 program testdns;
 
-uses AsyncNet.netdb, Sockets, stax, stax.functional;
+{$Mode ObjFpc}
+{$H+}
 
-Procedure DumpHostEntry(Const H : THostEntry);
+uses SysUtils, AsyncNet.netdb, stax, stax.functional;
 
+procedure TestDNSResolve;
+var
+  ResolveResult: TDNSResolveResult;
 begin
-  With H do
-    begin
-    Writeln('Name     : ',Name);
-    Writeln('Addr     : ',HostAddrToStr(Addr));
-    Writeln('Aliases  : ',Aliases);
-    Writeln;
-    end;
+  WriteLn('Testing DNS resolve of "google.com" at "8.8.8.8"');
+  Write('  IPv4: ');
+  try
+    ResolveResult := specialize Await<TDNSResolveResult>(AsyncDNSResolve('google.com', INAddr('8.8.8.8')));
+    Write(ResolveResult.Address.Address, ' TTL: ');
+    if ResolveResult.TTL = QWord.MaxValue then
+      WriteLn('forever')
+    else
+      WriteLn(ResolveResult.TTL);
+  except
+    WriteLn('Failure');
+  end;
+  Write('  IPv6: ');
+  try
+    ResolveResult := specialize Await<TDNSResolveResult>(AsyncDNSResolve('google.com', INAddr('8.8.8.8'), atIN6));
+    Write(ResolveResult.Address.Address, ' TTL: ');
+    if ResolveResult.TTL = QWord.MaxValue then
+      WriteLn('forever')
+    else
+      WriteLn(ResolveResult.TTL);;
+  except
+    WriteLn('Failure');
+  end;
+  WriteLn;
 end;
 
-Procedure TestAddr(Addr : string);
-
-Var
-  H : THostEntry;
-
+procedure TestResolve(const HostName: String);
+var
+  ResolveResult: TDNSResolveResult;
 begin
-  If ResolveHostByAddr(StrToHostAddr(Addr),H) then
-    DumpHostEntry(H)
-  else
-    Writeln('No entry for address ',Addr)
-end;
-
-Procedure TestName(Const N : string);
-
-Var
-  H : THostEntry;
-
-begin
-  If ResolveHostByName(N,H) then
-    DumpHostEntry(H)
-  else
-    Writeln('No entry for hostname ',N)
+  WriteLn('Resolving ', HostName);
+  Write('  IPv4 pref: ');
+  try
+    ResolveResult := specialize Await<TDNSResolveResult>(AsyncResolveName(HostName));
+    Write(ResolveResult.Address.Address, ' TTL: ');
+    if ResolveResult.TTL = QWord.MaxValue then
+      WriteLn('forever')
+    else
+      WriteLn(ResolveResult.TTL);
+  except
+    WriteLn('Failure');
+  end;
+  Write('  IPv6 pref: ');
+  try
+    ResolveResult := specialize Await<TDNSResolveResult>(AsyncResolveName(HostName, atIN6));
+    Write(ResolveResult.Address.Address, ' TTL: ');
+    if ResolveResult.TTL = QWord.MaxValue then
+      WriteLn('forever')
+    else
+      WriteLn(ResolveResult.TTL);
+  except
+    WriteLn('Failure');
+  end;
 end;
 
 procedure TestNetDB(AExecutor: TExecutor);
-Var
-  I,l : INteger;
-  Ans : Array [1..10] of THostAddr;
-  H   : THostAddr;
-  NAns : Array[1..10] of String;
 begin
-  Writeln('Resolving name ');
-  l:=ResolveName('google.com',Ans);
-  Writeln('Got : ',l,' answers');
-  For I:=1 to l do
-    Writeln(i:2,': ',hostAddrtostr(Ans[i]));
-  Writeln('Resolving address ');
-  H:=StrtoHostAddr('212.224.143.202');
-  L:=ResolveAddress(H,NAns);
-  Writeln('Got : ',l,' answers');
-  For I:=1 to l do
-    Writeln(i:2,': ',NAns[i]);
-  Writeln('ResolveHostByName:');
-  testname('maps.google.com');
-  Writeln('ResolveHostByAddr:');
-  testaddr('212.224.143.202');
+  TestDNSResolve;
+  TestResolve('localhost');
+  TestResolve('google.com');
+  TestResolve('forum.lazarus.freepascal.org');
 end;
 
 var
