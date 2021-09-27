@@ -131,7 +131,7 @@ type
     class function GenerateID: Word; static; inline;
     class constructor InitStatics;
   private
-    FDNSServerAddr: String;
+    FDNSServerAddr: TNetworkAddress;
     FUseUDP: Boolean;
     FPort: Integer;
     FRecursive: Boolean;
@@ -147,21 +147,21 @@ type
   protected
     procedure Execute; override;
   public
-    constructor Create(const ADNSServer: String; constref Questions: TDNSQuestionArray;
+    constructor Create(const ADNSServer: TNetworkAddress; constref Questions: TDNSQuestionArray;
                        ATimeout: Int64 = -1; ARecursive: Boolean = True;
                        APort: Integer = DefaultDNSPort; AUseUDP: Boolean = True); overload;
-    constructor Create(const ADNSServer: String; constref Questions: array of TDNSQuestion;
+    constructor Create(const ADNSServer: TNetworkAddress; constref Questions: array of TDNSQuestion;
                        ATimeout: Int64 = -1; ARecursive: Boolean = True;
                        APort: Integer = DefaultDNSPort; AUseUDP: Boolean = True); overload;
 
   end;
 
-function AsyncDNSRequest(const ADNSServer: String;
+function AsyncDNSRequest(const ADNSServer: TNetworkAddress;
                          constref Questions: array of TDNSQuestion;
                          ATimeout: Int64 = -1; ARecursive: Boolean = True;
                          APort: Integer = DefaultDNSPort; AUseUDP: Boolean = True
                          ): specialize TRVTask<TDNSResponse>; overload; inline;
-function AsyncDNSRequest(const ADNSServer: String;
+function AsyncDNSRequest(const ADNSServer: TNetworkAddress;
                          constref Questions: TDNSQuestionArray;
                          ATimeout: Int64 = -1; ARecursive: Boolean = True;
                          APort: Integer = DefaultDNSPort; AUseUDP: Boolean = True
@@ -329,7 +329,7 @@ begin
   Result := RecStart;
 end;
 
-function AsyncDNSRequest(const ADNSServer: String; constref
+function AsyncDNSRequest(const ADNSServer: TNetworkAddress; constref
   Questions: array of TDNSQuestion; ATimeout: Int64; ARecursive: Boolean;
   APort: Integer; AUseUDP: Boolean): specialize TRVTask<TDNSResponse>;
 begin
@@ -337,7 +337,7 @@ begin
                                    APort, AUseUDP);
 end;
 
-function AsyncDNSRequest(const ADNSServer: String; constref
+function AsyncDNSRequest(const ADNSServer: TNetworkAddress; constref
   Questions: TDNSQuestionArray; ATimeout: Int64; ARecursive: Boolean;
   APort: Integer; AUseUDP: Boolean): specialize TRVTask<TDNSResponse>;
 begin
@@ -487,7 +487,7 @@ begin
   try
     RequestID := WriteRequestToBuffer(Buffer, Buffer + RequestLength - 1);
     // Transmit request
-    Socket := TCPSocket;
+    Socket := TCPSocket(FDNSServerAddr.AddressType);
     try
       // establish TCP connection
       Await(AsyncConnect(Socket, FDNSServerAddr, FPort));
@@ -530,7 +530,7 @@ begin
     raise EOutOfBounds.Create('Request does not fit UDP package, use TCP instead');
   RequestID := WriteRequestToBuffer(@Buffer, @Buffer[High(Buffer)]);
   // Transmit request
-  Socket := UDPSocket;
+  Socket := UDPSocket(atIN4);
   try
     Await(AsyncSendTo(Socket, FDNSServerAddr, FPort, @Buffer, RequestLength));
     //Fetch response
@@ -553,7 +553,7 @@ begin
     TCPDNSRequest;
 end;
 
-constructor TDNSRequestTask.Create(const ADNSServer: String; constref
+constructor TDNSRequestTask.Create(const ADNSServer: TNetworkAddress; constref
   Questions: TDNSQuestionArray; ATimeout: Int64; ARecursive: Boolean;
   APort: Integer; AUseUDP: Boolean);
 begin
@@ -566,7 +566,7 @@ begin
   FUseUDP := AUseUDP;
 end;
 
-constructor TDNSRequestTask.Create(const ADNSServer: String; constref
+constructor TDNSRequestTask.Create(const ADNSServer: TNetworkAddress; constref
   Questions: array of TDNSQuestion; ATimeout: Int64; ARecursive: Boolean;
   APort: Integer; AUseUDP: Boolean);
 var

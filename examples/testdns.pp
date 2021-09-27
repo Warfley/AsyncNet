@@ -3,7 +3,7 @@ program testdns;
 {$Mode ObjFpc}
 {$H+}
 
-uses SysUtils, AsyncNet.netdb, stax, stax.functional;
+uses SysUtils, AsyncNet.netdb, stax, stax.functional, unit1;
 
 procedure TestDNSResolve;
 var

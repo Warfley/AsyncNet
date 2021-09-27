@@ -1,16 +1,23 @@
 unit asyncnet.sockets;
 
-// TODO: IPv6 support
-
 {$mode objfpc}{$H+}
 
 interface
 
 uses
-  SysUtils, stax, stax.asyncio, asyncnet.compatibility;
+  SysUtils, sockets, stax, stax.asyncio, asyncnet.compatibility;
 
 type
   TSocket = asyncnet.compatibility.TSocket;
+
+  TAddressType = (atIN4, atIN6);
+  TNetworkAddress = record
+    Address: String;
+    AddressType: TAddressType;
+  end;
+  TNetworkAddressArray = array of TNetworkAddress;
+
+  EUnsupportedAddress = class(Exception);
 
   { ESocketError }
 
@@ -28,7 +35,7 @@ type
 
   TAcceptResult = record
     Connection: TSocket;
-    PeerAddress: String;
+    PeerAddress: TNetworkAddress;
     PeerPort: Integer;
   end;
 
@@ -48,18 +55,18 @@ type
   TConnectTask = class(TTask)
   private
     FSocket: Tsocket;
-    FHost: String;
+    FAddress: TNetworkAddress;
     FPort: Integer;
 
   protected
     procedure Execute; override;
   public
-    constructor Create(ASocket: Tsocket; const AHost: String; APort: Integer);
+    constructor Create(ASocket: Tsocket; const AAddress: TNetworkAddress; APort: Integer);
   end;
 
   generic TUDPReceiveResult<T> = record
     Data: T;
-    Address: String;
+    Address: TNetworkAddress;
     Port: Integer;
   end;
 
@@ -100,7 +107,7 @@ type
 
   TUDPReceiveFromResult = record
     Size: SizeInt;
-    Address: String;
+    Address: TNetworkAddress;
     Port: Integer;
   end;
 
@@ -122,13 +129,13 @@ type
   generic TUDPSendTask<T> = class(specialize TRVTask<SizeInt>)
   private
     FSocket: TSocket;
-    FHost: String;
+    FAddress: TNetworkAddress;
     FPort: Integer;
     FData: T;
   protected
     procedure Execute; override;
   public
-    constructor Create(ASocket: TSocket; const AHost: String; APort: Integer; const AData: T);
+    constructor Create(ASocket: TSocket; const AAddress: TNetworkAddress; APort: Integer; const AData: T);
   end;
 
   { TUDPStringSendTask }
@@ -136,13 +143,13 @@ type
   TUDPStringSendTask = class(specialize TRVTask<SizeInt>)
   private
     FSocket: TSocket;
-    FHost: String;
+    FAddress: TNetworkAddress;
     FPort: Integer;
     FData: String;
   protected
     procedure Execute; override;
   public
-    constructor Create(ASocket: TSocket; const AHost: String; APort: Integer; const AData: String);
+    constructor Create(ASocket: TSocket; const AAddress: TNetworkAddress; APort: Integer; const AData: String);
   end;
 
   { TUDPArraySendTask }
@@ -152,13 +159,13 @@ type
     TArrayType = array of T;
   private
     FSocket: TSocket;
-    FHost: String;
+    FAddress: TNetworkAddress;
     FPort: Integer;
     FData: TArrayType;
   protected
     procedure Execute; override;
   public
-    constructor Create(ASocket: TSocket; const AHost: String; APort: Integer; const AData: TArrayType);
+    constructor Create(ASocket: TSocket; const AAddress: TNetworkAddress; APort: Integer; const AData: TArrayType);
   end;
 
   { TUDPBufferSendTask }
@@ -166,14 +173,14 @@ type
   TUDPBufferSendTask = class(specialize TRVTask<SizeInt>)
   private
     FSocket: TSocket;
-    FHost: String;
+    FAddress: TNetworkAddress;
     FPort: Integer;
     FBuffer: Pointer;
     FCount: SizeInt;
   protected
     procedure Execute; override;
   public
-    constructor Create(ASocket: TSocket; const AHost: String; APort: Integer; ABuffer: Pointer; ACount: SizeInt);
+    constructor Create(ASocket: TSocket; const AAddress: TNetworkAddress; APort: Integer; ABuffer: Pointer; ACount: SizeInt);
   end;
 
   { TNonBlockingTCPReceiver }
@@ -202,7 +209,7 @@ const
 
 // Connection establishment
 function AsyncAccept(AServerSocket: TSocket): specialize TRVTask<TAcceptResult>; inline;
-function AsyncConnect(ASocket: TSocket; const AHost: string; APort: Integer): TTask; inline;
+function AsyncConnect(ASocket: TSocket; const AAddress: TNetworkAddress; APort: Integer): TTask; inline;
 
 // TCP receiving
 function AsyncReceive(ASocket: Tsocket; ABuffer: Pointer; ACount: SizeInt; AwaitFullData: Boolean = True): specialize TRVTask<SizeInt>; overload; inline;
@@ -226,21 +233,33 @@ function AsyncSendLn(ASocket: Tsocket; const AData: String): TTask; inline;
 function AsyncSendStr(ASocket: Tsocket; const AData: String): TTask; inline;
 
 // UDP sending
-function AsyncSendTo(ASocket: Tsocket; const AHost: String; APort: Integer; ABuffer: Pointer; ACount: SizeInt): specialize TRVTask<SizeInt>; overload; inline;
-generic function AsyncSendTo<T>(ASocket: Tsocket; const AHost: String; APort: Integer; const AData: T):  specialize TRVTask<SizeInt>; overload; inline;
-generic function AsyncSendToArray<T>(ASocket: TSocket; const AHost: String; APort: Integer; const AData: specialize TArray<T>):  specialize TRVTask<SizeInt>; inline;
-function AsyncSendToStr(ASocket: Tsocket; const AHost: String; APort: Integer; const AData: String):  specialize TRVTask<SizeInt>; inline;
+function AsyncSendTo(ASocket: Tsocket; const AAddress: TNetworkAddress; APort: Integer; ABuffer: Pointer; ACount: SizeInt): specialize TRVTask<SizeInt>; overload; inline;
+generic function AsyncSendTo<T>(ASocket: Tsocket; const AAddress: TNetworkAddress; APort: Integer; const AData: T):  specialize TRVTask<SizeInt>; overload; inline;
+generic function AsyncSendToArray<T>(ASocket: TSocket; const AAddress: TNetworkAddress; APort: Integer; const AData: specialize TArray<T>):  specialize TRVTask<SizeInt>; inline;
+function AsyncSendToStr(ASocket: Tsocket; const AAddress: TNetworkAddress; APort: Integer; const AData: String):  specialize TRVTask<SizeInt>; inline;
 
 // Socket API helper
-function TCPSocket: TSocket; inline;
-function UDPSocket: TSocket;
-function TCPServerSocket(const AHost: String; APort: Integer): TSocket;
+function TCPSocket(AddressType: TAddressType): TSocket; inline;
+function UDPSocket(AddressType: TAddressType): TSocket; inline;
+function TCPServerSocket(const AAddress: TNetworkAddress; APort: Integer): TSocket;
 procedure TCPServerListen(AServerSocket: TSocket; Backlog: Integer); inline;
+
+// Address Management
+function IN4Address(const Address: String): TNetworkAddress; inline;
+function IN6Address(const Address: String): TNetworkAddress; inline;
+function INAddr(const Address: String): TNetworkAddress; inline;
+
+function IN6Equal(const A, B: String): Boolean;
+operator =(const A, B: TNetworkAddress): Boolean; inline;
+operator :=(const AStr: String): TNetworkAddress; inline;
 
 // Internal helper
 // Because generics can't reference static functions we publish them here
-// please don't use them directly
-procedure FillAddr(const AHost: String; APort: Integer; Addr: Pointer); inline;
+// please don't use them directly ;
+function IsIPv4Mapped(const IPv6Addr: TIn6Addr): Boolean; inline;
+function ExtractIPv4Address(const IPv6Addr: TIn6Addr): TNetworkAddress; inline;
+procedure FillAddr(const AAddress: TNetworkAddress; APort: Integer; Addr: PAddressUnion); inline;
+procedure ReadAddr(Addr: PAddressUnion; out AAddress: TNetworkAddress; out APort: Integer);
 function WaitingRecvFrom(AExecution: TExecutable; ASocket: TSocket; Buffer: Pointer;
                          BuffLen: SizeInt; Flags: Integer; Address: Pointer;
                          AddressLen: Pointer): SizeInt;
@@ -249,8 +268,6 @@ function WaitingSendTo(AExecution: TExecutable; ASocket: TSocket; Buffer: Pointe
                        AddressLen: SizeInt): SizeInt;
 
 implementation
-uses
-  Sockets;
 
 {$Region Async Functions}
 
@@ -260,10 +277,10 @@ begin
   Result := TAcceptTask.Create(AServerSocket);
 end;
 
-function AsyncConnect(ASocket: TSocket; const AHost: string;
+function AsyncConnect(ASocket: TSocket; const AAddress: TNetworkAddress;
   APort: Integer): TTask;
 begin
-  Result := TConnectTask.Create(ASocket, AHost, APort);
+  Result := TConnectTask.Create(ASocket, AAddress, APort);
 end;
 {$EndRegion Connections}
 
@@ -350,54 +367,76 @@ end;
 {$EndRegion TCP Send}
 
 {$Region UDP Send}
-function AsyncSendTo(ASocket: Tsocket; const AHost: String; APort: Integer;
-  ABuffer: Pointer; ACount: SizeInt): specialize TRVTask<SizeInt>;
+function AsyncSendTo(ASocket: Tsocket; const AAddress: TNetworkAddress;
+  APort: Integer; ABuffer: Pointer; ACount: SizeInt): specialize TRVTask<SizeInt
+  >;
 begin
-  Result := TUDPBufferSendTask.Create(ASocket, AHost, APort, ABuffer, ACount);
+  Result := TUDPBufferSendTask.Create(ASocket, AAddress, APort, ABuffer, ACount);
 end;
 
-generic function AsyncSendTo<T>(ASocket: Tsocket; const AHost: String; APort: Integer; const AData: T):  specialize TRVTask<SizeInt>;
+generic function AsyncSendTo<T>(ASocket: Tsocket; const AAddress: TNetworkAddress; APort: Integer; const AData: T):  specialize TRVTask<SizeInt>;
 begin
-  Result := specialize TUDPSendTask<T>.Create(ASocket, AHost, Aport, AData);
+  Result := specialize TUDPSendTask<T>.Create(ASocket, AAddress, Aport, AData);
 end;
 
-generic function AsyncSendToArray<T>(ASocket: TSocket; const AHost: String; APort: Integer; const AData: specialize TArray<T>):  specialize TRVTask<SizeInt>;
+generic function AsyncSendToArray<T>(ASocket: TSocket; const AAddress: TNetworkAddress; APort: Integer; const AData: specialize TArray<T>):  specialize TRVTask<SizeInt>;
 begin
-  Result := specialize TUDPArraySendTask<T>.Create(ASocket, AHost, Aport, AData);
+  Result := specialize TUDPArraySendTask<T>.Create(ASocket, AAddress, Aport, AData);
 end;
 
-function AsyncSendToStr(ASocket: Tsocket; const AHost: String; APort: Integer;
-  const AData: String): specialize TRVTask<SizeInt>;
+function AsyncSendToStr(ASocket: Tsocket; const AAddress: TNetworkAddress;
+  APort: Integer; const AData: String): specialize TRVTask<SizeInt>;
 begin
-  Result := TUDPStringSendTask.Create(ASocket, AHost, Aport, AData);
+  Result := TUDPStringSendTask.Create(ASocket, AAddress, Aport, AData);
 end;
 {$EndRegion UDP Send}
 {$EndRegion Async Functions}
 
 {$Region Socket Helper}
 
-function TCPSocket: TSocket;
-begin
-  Result := fpsocket(AF_INET, SOCK_STREAM, 0);
-  if SocketInvalid(Result) then
-    raise ESocketError.Create(socketerror, 'socket');
-end;
-
-function UDPSocket: TSocket;
-begin
-  Result := fpsocket(AF_INET, SOCK_DGRAM, 0);
-  if SocketInvalid(Result) then
-    raise ESocketError.Create(socketerror, 'socket');
-end;
-
-function TCPServerSocket(const AHost: String; APort: Integer): TSocket;
+function TCPSocket(AddressType: TAddressType): TSocket;
 var
-  addr: sockaddr_in;
+  AFam, v6Only: Integer;
 begin
-  Result := TCPSocket;
-  FillAddr(AHost, APort, @addr);
+  if AddressType = atIN4 then
+    AFam := AF_INET
+  else
+    AFam := AF_INET6;
+  Result := fpsocket(AFam, SOCK_STREAM, 0);
+  if SocketInvalid(Result) then
+    raise ESocketError.Create(socketerror, 'socket');
+  // On IPv6 try to use dual stack
+  v6Only := 0;
+  if AddressType = atIN6 then
+    fpsetsockopt(Result, IPPROTO_IP, IPV6_V6ONLY, @v6Only, SizeOf(v6Only));
+end;
+
+function UDPSocket(AddressType: TAddressType): TSocket;
+var
+  AFam, v6Only: Integer;
+begin
+  if AddressType = atIN4 then
+    AFam := AF_INET
+  else
+    AFam := AF_INET6;
+  Result := fpsocket(AFam, SOCK_DGRAM, 0);
+  if SocketInvalid(Result) then
+    raise ESocketError.Create(socketerror, 'socket');
+  // On IPv6 try to use dual stack
+  v6Only := 0;
+  if AddressType = atIN6 then
+    fpsetsockopt(Result, IPPROTO_IP, IPV6_V6ONLY, @v6Only, SizeOf(v6Only));
+end;
+
+function TCPServerSocket(const AAddress: TNetworkAddress; APort: Integer
+  ): TSocket;
+var
+  addr: TAddressUnion;
+begin
+  Result := TCPSocket(AAddress.AddressType);
+  FillAddr(AAddress, APort, @addr);
   if fpbind(Result, @addr, SizeOf(addr)) <> 0 then raise
-    ESocketError.Create(socketerror, 'bind (%s:%d)'.Format([AHost, APort]));
+    ESocketError.Create(socketerror, 'bind (%s:%d)'.Format([AAddress.Address, APort]));
 end;
 
 procedure TCPServerListen(AServerSocket: TSocket; Backlog: Integer);
@@ -408,13 +447,117 @@ end;
 
 {$EndRegion Socket Helper}
 
+{$Region Addres Management}
+
+function IN4Address(const Address: String): TNetworkAddress;
+begin
+ Result := Default(TNetworkAddress);
+ Result.Address := Address;
+ Result.AddressType := atIN4;
+end;
+
+function IN6Address(const Address: String): TNetworkAddress;
+begin
+ Result := Default(TNetworkAddress);
+ Result.Address := Address;
+ Result.AddressType := atIN6;
+end;
+
+function INAddr(const Address: String): TNetworkAddress;
+begin
+ Result := Default(TNetworkAddress);
+  if Pos(':', Address) = 0 then
+    Result.AddressType := atIN4
+  else
+    Result.AddressType := atIN6;
+  Result.Address := Address;
+end;
+
+function IN6Equal(const A, B: String): Boolean;
+var
+  AAddr, BAddr: Tin6_addr;
+begin
+  AAddr := StrToHostAddr6(A);
+  BAddr := StrToHostAddr6(B);
+  Result := (AAddr.s6_addr32[0] = BAddr.s6_addr32[0]) and
+            (AAddr.s6_addr32[1] = BAddr.s6_addr32[1]) and
+            (AAddr.s6_addr32[2] = BAddr.s6_addr32[2]) and
+            (AAddr.s6_addr32[3] = BAddr.s6_addr32[3]);
+end;
+
+operator=(const A, B: TNetworkAddress): Boolean;
+begin
+  Result := (A.AddressType = B.AddressType) and (
+              ((A.AddressType = atIN4) and (A.Address = B.Address)) or // IPv4: simple string equality
+              ((A.AddressType = atIN6) and IN6Equal(A.Address, B.Address)) // IPv6 check binary equality
+            );
+end;
+
+operator:=(const AStr: String): TNetworkAddress;
+begin
+  Result := INAddr(AStr);
+end;
+
+{$EndRegion Socket Helper}
+
 {$Region Send/Receive Helper}
 
-procedure FillAddr(const AHost: String; APort: Integer; Addr: Pointer);
+function IsIPv4Mapped(const IPv6Addr: TIn6Addr): Boolean;
 begin
-  psockaddr_in(Addr)^.sin_family := AF_INET;
-  psockaddr_in(Addr)^.sin_port := HToNS(APort);
-  psockaddr_in(Addr)^.sin_addr.s_addr := LongWord(StrToNetAddr(AHost));
+  Result := (IPv6Addr.u6_addr16[0] = 0) and
+            (IPv6Addr.u6_addr16[1] = 0) and
+            (IPv6Addr.u6_addr16[2] = 0) and
+            (IPv6Addr.u6_addr16[3] = 0) and
+            (IPv6Addr.u6_addr16[4] = 0) and
+            (IPv6Addr.u6_addr16[5] = $FFFF);
+end;
+
+function ExtractIPv4Address(const IPv6Addr: TIn6Addr): TNetworkAddress;
+begin
+  Result := IN4Address('%d.%d.%d.%d'.Format([IPv6Addr.s6_addr8[12],
+                                             IPv6Addr.s6_addr8[13],
+                                             IPv6Addr.s6_addr8[14],
+                                             IPv6Addr.s6_addr8[15]]));
+end;
+
+procedure FillAddr(const AAddress: TNetworkAddress; APort: Integer; Addr: PAddressUnion);
+begin
+  if AAddress.AddressType = atIN4 then
+  begin
+    Addr^.In4Addr.sin_family := AF_INET;
+    Addr^.In4Addr.sin_port := HToNS(APort);
+    Addr^.In4Addr.sin_addr.s_addr := LongWord(StrToNetAddr(AAddress.Address));
+  end
+  else if AAddress.AddressType = atIN6 then
+  begin
+    Addr^.In6Addr.sin6_family := AF_INET6;
+    Addr^.In6Addr.sin6_port := HToNS(APort);
+    Addr^.In6Addr.sin6_addr := StrToHostAddr6(AAddress.Address);
+    Addr^.In6Addr.sin6_flowinfo := 0;
+    Addr^.In6Addr.sin6_scope_id := 0;
+  end
+  else
+    raise EUnsupportedAddress.Create('Address type ' + ord(AAddress.AddressType).ToString + ' not supported');
+end;
+
+procedure ReadAddr(Addr: PAddressUnion; out AAddress: TNetworkAddress; out
+  APort: Integer);
+begin
+  if Addr^.In4Addr.sin_family = AF_INET then
+  begin
+    AAddress := IN4Address(NetAddrToStr(Addr^.In4Addr.sin_addr));
+    APort := NToHs(Addr^.In4Addr.sin_port);
+  end
+  else if Addr^.In6Addr.sin6_family = AF_INET6 then
+  begin
+    if IsIPv4Mapped(Addr^.In6Addr.sin6_addr) then
+      AAddress := ExtractIPv4Address(Addr^.In6Addr.sin6_addr)
+    else
+      AAddress := IN6Address(HostAddrToStr6(Addr^.In6Addr.sin6_addr));
+    APort := NToHs(Addr^.In6Addr.sin6_port);
+  end
+  else
+    raise EUnsupportedAddress.Create('Address Family ' + Addr^.In4Addr.sin_family.ToString + ' not supported');
 end;
 
 procedure WaitForHandshake(ATask: TTask; ASocket: Tsocket); //inline;
@@ -510,18 +653,18 @@ end;
 
 procedure TUDPSendTask.Execute;
 var
-  addr: sockaddr_in;
+  addr: TAddressUnion;
 begin
-  FillAddr(FHost, FPort, @addr);
+  FillAddr(FAddress, FPort, @addr);
   FResult := WaitingSendTo(Self, FSocket, @FData, SizeOf(T), 0, @addr, SizeOf(addr));
 end;
 
-constructor TUDPSendTask.Create(ASocket: TSocket; const AHost: String;
+constructor TUDPSendTask.Create(ASocket: TSocket; const AAddress: TNetworkAddress;
   APort: Integer; const AData: T);
 begin
   inherited Create;
   FSocket := ASocket;
-  FHost := AHost;
+  FAddress := AAddress;
   FPort := APort;
   FData := AData;
 end;
@@ -530,18 +673,18 @@ end;
 
 procedure TUDPStringSendTask.Execute;
 var
-  addr: sockaddr_in;
+  addr: TAddressUnion;
 begin
-  FillAddr(FHost, FPort, @addr);
+  FillAddr(FAddress, FPort, @addr);
   FResult := WaitingSendTo(Self, FSocket, PChar(FData), Length(FData), 0, @addr, SizeOf(addr));
 end;
 
-constructor TUDPStringSendTask.Create(ASocket: TSocket; const AHost: String;
+constructor TUDPStringSendTask.Create(ASocket: TSocket; const AAddress: TNetworkAddress;
   APort: Integer; const AData: String);
 begin
   inherited Create;
   FSocket := ASocket;
-  FHost := AHost;
+  FAddress := AAddress;
   FPort := APort;
   FData := AData;
 end;
@@ -550,18 +693,18 @@ end;
 
 procedure TUDPArraySendTask.Execute;
 var
-  addr: sockaddr_in;
+  addr: TAddressUnion;
 begin
-  FillAddr(FHost, FPort, @addr);
+  FillAddr(FAddress, FPort, @addr);
   FResult := WaitingSendTo(Self, FSocket, @FData[0], Length(FData) * SizeOf(T), 0, @addr, SizeOf(addr));
 end;
 
-constructor TUDPArraySendTask.Create(ASocket: TSocket; const AHost: String;
+constructor TUDPArraySendTask.Create(ASocket: TSocket; const AAddress: TNetworkAddress;
   APort: Integer; const AData: TArrayType);
 begin
   Inherited Create;
   FSocket := ASocket;
-  FHost := AHost;
+  FAddress := AAddress;
   FPort := APort;
   FData := AData;
 end;
@@ -570,18 +713,18 @@ end;
 
 procedure TUDPBufferSendTask.Execute;
 var
-  addr: sockaddr_in;
+  addr: TAddressUnion;
 begin
-  FillAddr(FHost, FPort, @addr);
+  FillAddr(FAddress, FPort, @addr);
   FResult := WaitingSendTo(Self, FSocket, FBuffer, FCount, 0, @addr, SizeOf(addr));
 end;
 
-constructor TUDPBufferSendTask.Create(ASocket: TSocket; const AHost: String;
+constructor TUDPBufferSendTask.Create(ASocket: TSocket; const AAddress: TNetworkAddress;
   APort: Integer; ABuffer: Pointer; ACount: SizeInt);
 begin
   inherited Create;
   FSocket := ASocket;
-  FHost := AHost;
+  FAddress := AAddress;
   FPort := APort;
   FBuffer := ABuffer;
   FCount := ACount;
@@ -592,13 +735,14 @@ end;
 procedure TUDPReceiveTask.Execute;
 var
   {$IfNDef WINDOWS}
-  _addr: sockaddr;
+  _addr: TAddressUnion;
   _addrLen: SizeInt;
   {$EndIf}
-  addr: psockaddr_in;
+  addr: PAddressUnion;
   addrLen: PSizeInt;
   dataLen: SizeInt;
 begin
+inherited Execute;
   {$IfDef WINDOWS}
   // WinSock doesn't like the addr located on the stack, therefore we create a heap instance for it
   New(addr);
@@ -608,10 +752,9 @@ begin
   addr := @_addr;
   addrLen := @_addrLen;
   {$EndIf}
-  addrLen^ := SizeOf(sockaddr);
+  addrLen^ := SizeOf(TAddressUnion);
   dataLen := WaitingRecvFrom(Self, FSocket, @FResult.Data, SizeOf(T), 0, addr, addrLen);
-  FResult.Port := NToHS(addr^.sin_port);
-  FResult.Address := NetAddrToStr(addr^.sin_addr);
+  ReadAddr(addr, FResult.Address, FResult.Port);
   if dataLen < SizeOf(T) then
     raise EUDPFragmentationException.Create('Receiving of fragmented data is not supported by typed receive');
   {$IfDef WINDOWS}
@@ -633,13 +776,14 @@ end;
 procedure TUDPStringReceiveTask.Execute;
 var
   {$IfNDef WINDOWS}
-  _addr: sockaddr;
+  _addr: TAddressUnion;
   _addrLen: SizeInt;
   {$EndIf}
-  addr: psockaddr_in;
+  addr: PAddressUnion;
   addrLen: PSizeInt;
   dataLen: SizeInt;
 begin
+  inherited Execute;
   {$IfDef WINDOWS}
   // WinSock doesn't like the addr located on the stack, therefore we create a heap instance for it
   New(addr);
@@ -650,11 +794,10 @@ begin
   addrLen := @_addrLen;
   {$EndIf}
   SetLength(FResult.Data, FMaxLength);
-  addrLen^ := SizeOf(sockaddr);
+  addrLen^ := SizeOf(TAddressUnion);
   dataLen := WaitingRecvFrom(Self, FSocket, PChar(FResult.Data), FMaxLength, 0, addr, addrLen);
   SetLength(FResult.Data, dataLen);
-  FResult.Port := NToHS(addr^.sin_port);
-  FResult.Address := NetAddrToStr(addr^.sin_addr);
+  ReadAddr(addr, FResult.Address, FResult.Port);;
   {$IfDef WINDOWS}
   finally
     Dispose(addr);
@@ -676,13 +819,14 @@ end;
 procedure TUDPArrayReceiveTask.Execute;
 var
   {$IfNDef WINDOWS}
-  _addr: sockaddr;
+  _addr: TAddressUnion;
   _addrLen: SizeInt;
   {$EndIf}
-  addr: psockaddr_in;
+  addr: PAddressUnion;
   addrLen: PSizeInt;
   dataLen: SizeInt;
 begin
+  inherited Execute;
   {$IfDef WINDOWS}
   // WinSock doesn't like the addr located on the stack, therefore we create a heap instance for it
   New(addr);
@@ -693,11 +837,10 @@ begin
   addrLen := @_addrLen;
   {$EndIf}
   SetLength(FResult.Data, FMaxCount);
-  addrLen^ := SizeOf(sockaddr);
+  addrLen^ := SizeOf(TAddressUnion);
   dataLen := WaitingRecvFrom(Self, FSocket, @FResult.Data[0], FMaxCount * SizeOf(T), 0, addr, addrLen);
   SetLength(FResult.Data, dataLen div SizeOf(T));
-  FResult.Port := NToHS(addr^.sin_port);
-  FResult.Address := NetAddrToStr(addr^.sin_addr);
+  ReadAddr(addr, FResult.Address, FResult.Port);
   if dataLen mod SizeOf(T) > 0 then
     raise EUDPFragmentationException.Create('Receiving of fragmented data is not supported by typed receive');
   {$IfDef WINDOWS}
@@ -720,12 +863,13 @@ end;
 procedure TUDPBufferReceiveTask.Execute;
 var
   {$IfNDef WINDOWS}
-  _addr: sockaddr;
+  _addr: TAddressUnion;
   _addrLen: SizeInt;
   {$EndIf}
-  addr: psockaddr_in;
+  addr: PAddressUnion;
   addrLen: PSizeInt;
 begin
+  inherited Execute;
   {$IfDef WINDOWS}
   // WinSock doesn't like the addr located on the stack, therefore we create a heap instance for it
   New(addr);
@@ -735,10 +879,9 @@ begin
   addr := @_addr;
   addrLen := @_addrLen;
   {$EndIf}
-  addrLen^ := SizeOf(sockaddr);
+  addrLen^ := SizeOf(TAddressUnion);
   FResult.Size := WaitingRecvFrom(Self, FSocket, FBuffer, FBufferLen, 0, addr, addrLen);
-  FResult.Port := NToHS(addr^.sin_port);
-  FResult.Address := NetAddrToStr(addr^.sin_addr);
+  ReadAddr(addr, FResult.Address, FResult.Port);
   {$IfDef WINDOWS}
   finally
     Dispose(addr);
@@ -829,13 +972,11 @@ end;
 procedure TConnectTask.Execute;
 var
   OldState, err, success: LongInt;
-  addr: TSockAddr;
+  addr: TAddressUnion;
 begin
   OldState := SetNonBlocking(FSocket);
   try
-    addr.sin_family := AF_INET;
-    addr.sin_port := HToNS(FPort);
-    addr.sin_addr.s_addr := LongWord(StrToNetAddr(FHost));
+    FillAddr(FAddress, FPort, @addr);
     success := fpconnect(FSocket, @addr, SizeOf(addr));
     if success <> 0 then
     begin
@@ -850,12 +991,12 @@ begin
   end;
 end;
 
-constructor TConnectTask.Create(ASocket: Tsocket; const AHost: String;
+constructor TConnectTask.Create(ASocket: Tsocket; const AAddress: TNetworkAddress;
   APort: Integer);
 begin
   inherited Create;
   FSocket := ASocket;
-  FHost := AHost;
+  FAddress := AAddress;
   FPort := APort;
 end;
 
@@ -865,9 +1006,10 @@ procedure TAcceptTask.Execute;
 var
   OldState, err: LongInt;
   Conn: TSocket;
-  addr: sockaddr_in;
+  addr: TAddressUnion;
   addrLen: SizeInt;
 begin
+  inherited Execute;
   addrLen := SizeOf(addr);
   OldState := SetNonBlocking(FServerSocket);
   try
@@ -887,8 +1029,7 @@ begin
     RestoreBlocking(FServerSocket, OldState);
   end;
   FResult.Connection := Conn;
-  FResult.PeerAddress := NetAddrToStr(addr.sin_addr);
-  FResult.PeerPort := NToHS(addr.sin_port);
+  ReadAddr(@Addr, FResult.PeerAddress, FResult.PeerPort);
 end;
 
 constructor TAcceptTask.Create(AServerSocket: Tsocket);

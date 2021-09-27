@@ -7,12 +7,23 @@ interface
 uses
   SysUtils, Sockets {$IfDef Windows}, WinSock2{$Else}, BaseUnix{$EndIf};
 
+const
+  IPPROTO_IP = {$IfDef WINDOWS}41{$Else}41{$EndIf};
+  IPV6_V6ONLY = {$IfDef WINDOWS}27{$Else}26{$EndIf};
+
 type
   TSocket = {$IfDef Windows}WinSock2.TSocket{$Else}Sockets.Tsocket{$EndIf};
   TFDSet = {$IfDef Windows}WinSock2.TFDSet{$Else}BaseUnix.TFDSet{$EndIf};
   PFDSet = {$IfDef Windows}WinSock2.PFDSet{$Else}BaseUnix.PFDSet{$EndIf};
   TTimeVal = {$IfDef Windows}WinSock2.TTimeVal{$Else}BaseUnix.TTimeVal{$EndIf};
   PTimeVal = {$IfDef Windows}WinSock2.PTimeVal{$Else}BaseUnix.PTimeVal{$EndIf};
+
+  PAddressUnion = ^TAddressUnion;
+  TAddressUnion = record
+  case Boolean of
+  True: (In4Addr: Sockets.sockaddr_in);
+  False: (In6Addr: Sockets.sockaddr_in6);
+  end;
 
 function SetNonBlocking(ASocket: Tsocket): Integer;
 procedure RestoreBlocking(ASocket: Tsocket; OldState: Integer);

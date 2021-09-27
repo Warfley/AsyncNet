@@ -3,7 +3,7 @@ program dnsresolve;
 {$mode objfpc}{$H+}
 
 uses
-  SysUtils, sockets, stax, stax.functional, AsyncNet.dns, AsyncNet.dns.resrecords;
+  SysUtils, sockets, stax, stax.functional, AsyncNet.sockets, AsyncNet.dns, AsyncNet.dns.resrecords;
 
 procedure DNSTestUDP(AExecutor: TExecutor);
 var

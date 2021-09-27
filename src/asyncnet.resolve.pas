@@ -1,606 +1,259 @@
-{$MODE OBJFPC}
+unit asyncnet.resolve;
+
+{$Mode ObjFpc}
 {$H+}
-Unit asyncnet.resolve;
-
-{ --------------------------------------------------------------------
-  Unit for internet domain calls.
-  Copyright (C) 2003  Michael Van Canneyt
-
-  This program is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation; either version 1, or (at your option)
-  any later version.
-
-  This program is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program; if not, write to the Free Software
-  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-
-  ------------------------------------------------------------------- }
 
 interface
 
-uses
-  sockets,Classes,UriParser;
+uses Classes, SysUtils, stax, AsyncNet.sockets, AsyncNet.netdb;
 
-Type
-  THostAddr = in_addr;		
-  PHostAddr = ^THostAddr;
-  TNetAddr = in_addr;
-  PNetAddr = ^TNetAddr;
-
-Type
-
-{ ---------------------------------------------------------------------
-    TResolver
-  ---------------------------------------------------------------------}
-
-  TResolver = Class (TComponent)
-  Private
-    FName : String;
-    FAliases : TStringList;
-    FRaiseOnError : Boolean;
-    FLastError: Integer;
-    Function GetAlias(Index : Integer) : STring;
-    Function GetAliasCount : Integer;
-    Function GetAliasSorted : Boolean;
-    Procedure SetAliasSorted (Value : Boolean);
-  Protected
-    Procedure CheckOperation(Msg : String);
-    Function NameLookup(Const S : String) : Boolean; virtual;
-    Procedure SaveAliases(P : PPChar);
-  Public
-    Constructor Create(AOwner : TComponent); override;
-    Destructor Destroy; override;
-    Procedure ClearData; virtual;
-    Property ResolvedName : String Read FName;
-    Property Aliases [Index : integer ] : string Read GetAlias;
-    Property AliasCount : Integer read GetAliasCount;
-    Property SortAliases : Boolean Read GetAliasSorted Write SetAliasSorted;
-    Property RaiseOnError : Boolean Read FRaiseOnError Write FRAiseOnError;
-    Property LastError : Integer Read FlastError;
+type
+  TDNSResolveResult = record
+    Address: TNetworkAddress;
+    TTL: QWord;
   end;
 
-{ ---------------------------------------------------------------------
-    THostResolver
-  ---------------------------------------------------------------------}
+  { TDNSResolveTask }
 
-  THostResolver = Class(TResolver)
-  Private
-    FHostAddress : THostAddr;
-    FAddressCount : Integer;
-    FAddresses : PHostAddr;
-    Function GetAddress (Index : Integer) : THostAddr;
-    Function GetNetAddress (Index : Integer) : THostAddr;
-    Function GetNetHostAddress : THostAddr;
-    Function GetAsString : String;
-    Procedure SaveHostEntry (Entry : Pointer);
-  Public
-    Procedure ClearData; Override;
-    Function NameLookup(Const S : String) : Boolean; override;
-    Function AddressLookup(Const S : String) : Boolean; virtual;
-    Function AddressLookup(Const Address : THostAddr) : Boolean; virtual;
-    Property HostAddress : THostAddr Read FHostAddress;
-    Property NetHostAddress : THostAddr Read GetNetHostAddress;
-    Property AddressAsString : String Read GetAsString;
-    Property AddressCount : Integer Read FAddressCount ;
-    Property Addresses [Index : Integer] : ThostAddr Read GetAddress;
-    Property NetAddresses [Index : Integer] : ThostAddr Read GetNetAddress;
-  end;
-
-{ ---------------------------------------------------------------------
-    TNetResolver
-  ---------------------------------------------------------------------}
-
-  TNetResolver = Class(TResolver)
-  Private
-    FNetAddress : TNetAddr;
-    FAddrType : Integer;
-    Function  GetAsString : String;
-    Procedure SaveNetEntry(Entry : Pointer);
-    Function GetNetAddress : TNetAddr;
-  Public
-    Procedure ClearData; override;
-    Function NameLookup(Const S : String) : boolean; override;
-    Function AddressLookup(Const S : String) : Boolean; virtual;
-    Function AddressLookup(Const Address : TNetAddr) : Boolean; virtual;
-    Property NetAddress : TNetAddr Read FNetAddress;
-    Property NetNetAddress : TNetAddr Read GetNetAddress;
-    Property AddressAsString : String Read GetAsString;
-    Property AddressType : Integer Read FAddrType;
-  end;
-
-{ ---------------------------------------------------------------------
-    TServiceResolver
-  ---------------------------------------------------------------------}
-
-  TServiceResolver = Class(TResolver)
+  TDNSResolveTask = class(specialize TRVTask<TDNSResolveResult>)
   private
-    FProtocol : String;
-    FPort : Integer;
-    Procedure SaveServiceEntry(Entry : Pointer);
-    Function GetNetPort : Integer ;
+    FHostName: String;
+    FDNSServer: TNetworkAddress;
+    FTimeOut: Integer;
+    FAddressType: TAddressType;
+    FRecursionDepth: Integer;
+  protected
+    procedure Execute; override;
   public
-    Procedure ClearData; override;
-    Function NameLookup (Const S : String) : boolean; override;
-    Function NameLookup (Const S,Proto : String) : Boolean;
-    Function PortLookup (APort : Longint; Proto: string) : Boolean;
-    Property Protocol : String Read FProtocol;
-    Property Port : Integer Read FPort;
-    Property NetPort : Integer Read GetNetPort;
+    constructor Create(const AHostName: String; const ADNSServer: TNetworkAddress;
+                       AddressType: TAddressType = atIN4; ATimeOut: Integer = DefaultDNSTimeout;
+                       ARecursionDepth: Integer = DefaultDNSRecursionDepth);
   end;
 
-  TURIParser = Class(TComponent)
-  Private
-    FActive : Boolean;
-    FProtocol: String;
-    FUsername: String;
-    FPassword: String;
-    FHost: String;
-    FPort: Word;
-    FPath: String;
-    FDocument: String;
-    FParams: String;
-    FBookmark: String;
-    FURI : String;
-  Protected
-    Procedure SetElement (Index : Integer; Value : String);Virtual;
-    Function GetElement(Index : Integer) : String;
-    Procedure SetPort(Value : Word);
-    Procedure SetURI(Value : String);
-  Public
-    Procedure Clear;
-    Procedure ParseUri(AURI : String);
-    Function ComposeURI : String;
-  Published
-    Property Port: Word  Read FPort Write SetPort;
-    Property Protocol: String Index 0 Read GetElement Write SetElement;
-    Property Username: String Index 1 Read GetElement Write SetElement;
-    Property Password: String Index 2 Read GetElement Write SetElement;
-    Property Host: String     Index 3 Read GetElement Write SetElement;
-    Property Path: String     index 4 Read GetElement Write SetElement;
-    Property Document: String index 5 read GetElement Write SetElement;
-    Property Params: String   Index 6 read GetElement Write SetElement;
-    Property Bookmark: String Index 7 Read GetElement Write SetElement;
-    Property URI : String Read FURI write SetURI;
-    Property Active : Boolean Read FActive Write FActive;
+  { TResolveNameTask }
+
+  TResolveNameTask = class(specialize TRVTask<TDNSResolveResult>)
+  private
+    FHostName: String;
+    FPreferredType: TAddressType;
+
+    function ResolveHostsDB(const AHostNames: TStringArray): Boolean;
+    function ResolveDNS(const AHostNames: TStringArray; DNSServers: TStringList;
+                        Timeout: QWord; Attempts: Integer): Boolean;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(const AHostName: String; APreferredType: TAddressType = atIN4);
   end;
 
+// Async functions
+function AsyncDNSResolve(const AHostName: String; const ADNSServer: TNetworkAddress;
+                       AAddressType: TAddressType = atIN4; ATimeOut: Integer = DefaultDNSTimeout;
+                       ARecursionDepth: Integer = DefaultDNSRecursionDepth): TDNSResolveTask; inline;
+function AsyncResolveName(const AHostName: String; PreferredType: TAddressType = atIN4): TResolveNameTask; inline;
 
-Resourcestring
-  SErrHostByName = 'Host by name';
-  SErrHostByAddr = 'Host by address';
-  SErrNetByName  = 'Net by name';
-  SErrServByName = 'Service by name';
-  SErrServByPort = 'Service by port';
+implementation
 
-Implementation
+uses sockets, AsyncNet.dns, AsyncNet.dns.resrecords;
 
-{ ---------------------------------------------------------------------
-    Include system dependent stuff.
-  ---------------------------------------------------------------------}
-
-uses asyncnet.netdb;
-
-{ ---------------------------------------------------------------------
-  TResolver
-  ---------------------------------------------------------------------}
-
-Constructor TResolver.Create(AOwner : TComponent);
-
+function AsyncDNSResolve(const AHostName: String;
+  const ADNSServer: TNetworkAddress; AAddressType: TAddressType;
+  ATimeOut: Integer; ARecursionDepth: Integer): TDNSResolveTask;
 begin
-  Inherited;
-  FAliases:=TstringList.Create;
+  Result := TDNSResolveTask.Create(AHostName, ADNSServer, AAddressType, ATimeOut, ARecursionDepth);
 end;
 
-Destructor TResolver.Destroy;
-
+function AsyncResolveName(const AHostName: String; PreferredType: TAddressType
+  ): TResolveNameTask;
 begin
-  ClearData;
-  FAliases.Free;
+  Result := TResolveNameTask.Create(AHostName, PreferredType);
 end;
 
-Procedure TResolver.ClearData;
+{ TDNSResolveTask }
 
+procedure TDNSResolveTask.Execute;
+var
+  Resp: TDNSResponse;
+  Questions: TDNSQuestionArray;
+  Start, TimeTaken, TTL: QWord;
 begin
-  FName:='';
-  FAliases.Clear;
+  FResult := Default(TDNSResolveResult);
+
+  // Error checking
+  if FRecursionDepth <= 0 then
+    raise EMaxRecursionDepthExceeded.Create('CNAME chain length exceeded maximum recursion depth');
+
+  // DNS query
+  Questions := Default(TDNSQuestionArray);
+  SetLength(Questions, 1);
+  if (FAddressType = atIN6) then
+    Questions[0] := DNSQuestion(FHostName, rrtAAAA)
+  else
+    Questions[0] := DNSQuestion(FHostName, rrtA);
+
+  start := GetTickCount64;
+  Resp := specialize Await<TDNSResponse>(AsyncDNSRequest(FDNSServer,
+                                                         Questions, FTimeOut));
+  TimeTaken := GetTickCount64 - Start;
+
+  // Parse result
+  if (FAddressType = atIN6) and (Length(Resp.Answers.AAAARecords) > 0) then
+  begin
+    FResult.Address := IN6Address(HostAddrToStr6(Resp.Answers.AAAARecords[0].Data));
+    FResult.TTL := Resp.Answers.AAAARecords[0].TTL;
+  end
+  else if (FAddressType = atIN4) and (Length(Resp.Answers.ARecords) > 0) then
+  begin
+    FResult.Address := IN4Address(HostAddrToStr(Resp.Answers.ARecords[0].Data));
+    FResult.TTL := Resp.Answers.ARecords[0].TTL;
+  end
+  else if Length(Resp.Answers.CNAMERecords) > 0 then
+  begin
+    TTL := Resp.Answers.CNAMERecords[0].TTL;
+    FResult := specialize Await<TDNSResolveResult>(TDNSResolveTask.Create(Resp.Answers.CNAMERecords[0].Data,
+                                                  FDNSServer, FAddressType, FTimeOut - TimeTaken,
+                                                  FRecursionDepth - 1));
+    // The TTL of the query result is the minimum of the cname chain
+    if FResult.TTL > TTL then
+      FResult.TTL := TTL;
+  end
+  else
+    raise EQueryUnseccesfull.Create('Unable to resolve "' + FHostName + '" at "' + FDNSServer.Address+ '"');
 end;
 
-Function TResolver.GetAlias(Index : Integer) : STring;
+{ TResolveNameTask }
 
+function TResolveNameTask.ResolveHostsDB(const AHostNames: TStringArray
+  ): Boolean;
+var
+  HostName: String;
+  Entry: THostEntry;
+  Addr: TNetworkAddress;
 begin
-  Result:=FAliases[Index];
-end;
-
-Function TResolver.GetAliasCount : Integer;
-
-begin
-  Result:=FAliases.Count;
-end;
-
-Function TResolver.GetAliasSorted : Boolean;
-
-begin
-  Result:=FAliases.Sorted;
-end;
-
-Procedure TResolver.SetAliasSorted (Value : Boolean);
-
-begin
-  FAliases.Sorted:=Value;
-end;
-
-Procedure TResolver.CheckOperation(Msg : String);
-
-begin
-end;
-
-Function TResolver.NameLookup(Const S : String) : Boolean;
-
-begin
-  ClearData;
-  FName:=S;
-  Result:=True;
-end;
-
-Procedure TResolver.SaveAliases(P : PPChar);
-
-Var
-  I : Integer;
-
-begin
-  If (P<>Nil) then
-    begin
-    I:=0;
-    While P[I]<>Nil do
+  Result := False;
+  HostsDB.BeginAccess;
+  try
+    for HostName in AHostNames do
+      if HostsDB.TryFindHost(HostName, Entry) then
       begin
-      FAliases.Add(StrPas(P[I]));
-      Inc(I);
+        FResult.Address := Entry.Addresses[0];
+        for Addr in Entry.Addresses do
+          if Addr.AddressType = FPreferredType then
+          begin
+            FResult.Address := Addr;
+            Break;
+          end;
+        FResult.TTL := QWord.MaxValue;
+        Exit(True);
+      end;
+  finally
+    HostsDB.EndAccess;
+  end;
+end;
+
+function TResolveNameTask.ResolveDNS(const AHostNames: TStringArray;
+  DNSServers: TStringList; Timeout: QWord; Attempts: Integer): Boolean;
+var
+  ServerIndex: Integer;
+  HostName: String;
+  OtherType: TAddressType;
+  DNSServer: TNetworkAddress;
+begin
+  Result := False;
+  ServerIndex := 0;
+  // try Attempts many times
+  while (Attempts > 0) and not Result do
+  begin
+    DNSServer := INAddr(DNSServers[ServerIndex]);
+    // Try each of the hostnames
+    for HostName in AHostNames do
+    begin
+      // first try preferred
+      try
+        FResult := specialize Await<TDNSResolveResult>(AsyncDNSResolve(HostName,
+                                                                       DNSServer,
+                                                                       FPreferredType,
+                                                                       Timeout));
+        // No exception: successful attempt
+        Result := True;
+        Break;
+      except
+        on E: ETaskTerminatedException do
+          raise E; // if terminated kill by re-raising
+        on E: Exception do; // Ignore all other exceptions
+      end;
+      // Preferred type not found, search the other type
+      if FPreferredType = atIN4 then
+        OtherType := atIN6
+      else
+        OtherType := atIN4;
+      try
+        FResult := specialize Await<TDNSResolveResult>(AsyncDNSResolve(HostName,
+                                                                       DNSServer,
+                                                                       OtherType,
+                                                                       Timeout)); // No exception: successful attempt
+        Result := True;
+        Break;
+      except
+        on E: ETaskTerminatedException do
+          raise E; // if terminated kill by re-raising
+        on E: Exception do; // Ignore all other exceptions
       end;
     end;
-end;
-
-
-{ ---------------------------------------------------------------------
-  THostResolver
-  ---------------------------------------------------------------------}
-
-Function THostResolver.GetAddress (Index : Integer) : THostAddr;
-
-begin
-  If (Index>=0) and (Index<FAddressCount) then
-    Result:=FAddresses[Index];
-end;
-
-Function THostResolver.GetAsString : String;
-
-begin
-  Result:=HostAddrToStr(FHostAddress);
-end;
-
-Procedure THostResolver.ClearData;
-
-begin
-  Inherited;
-  FHostAddress:=NoAddress;
-  If FAddressCount<>0 Then
-    FreeMem(FAddresses);
-  FAddressCount:=0;
-  FAddresses:=Nil;
-end;
-
-Function THostResolver.AddressLookup(Const S : String) : Boolean;
-
-begin
-  Result:=AddressLookup(StrToHostAddr(S));
-end;
-
-Function THostResolver.NameLookup (Const S : String) : Boolean;
-
-Var
-  H : THostEntry;
-
-begin
-  Result:=Inherited NameLookup(S);
-  If Result then
-    begin
-    //Result:=GetHostByName(S,H);
-    if not Result then
-      //Result:=ResolveHostByName(S,H)
-    else
-      ;//H.Addr:=H.Addr;
-    If Result then
-      SaveHostEntry(@H);
-    end;
-end;
-
-Function THostResolver.AddressLookup (Const Address: THostAddr) : Boolean;
-
-Var
-  H : THostEntry;
-
-begin
-  ClearData;
-  //Result:=ResolveHostByAddr(Address,H);
-  If Result then
-    SaveHostEntry(@H);
-end;
-
-Procedure THostResolver.SaveHostEntry(Entry : Pointer);
-
-Var
-  PH : ^THostEntry;
-  I : Integer;
-
-begin
-  PH:=ENtry;
-  FName:=PH^.Name;
-  //FHostAddress:=NetToHost(PH^.Addr);
-  FAddressCount:=1;
-  GetMem(FAddresses,SizeOf(THostAddr));
-  //FAddresses[0]:=NetToHost(PH^.Addr);
-  //FAliases.CommaText:=PH^.Aliases;
-end;
-
-Function THostResolver.GetNetAddress (Index : Integer) : THostAddr;
-
-begin
-  Result:=HostToNet(Addresses[Index]);
-end;
-
-Function THostResolver.GetNetHostAddress : THostAddr;
-
-begin
-  Result:=HostToNet(FHostAddress);
-end;
-
-
-{ ---------------------------------------------------------------------
-    TNetResolver
-  ---------------------------------------------------------------------}
-
-Function TNetResolver.AddressLookup (Const Address: TNetAddr) : boolean;
-
-Var
-  N : TNetworkEntry;
-
-begin
-  ClearData;
-  //Result:=GetNetworkByAddr(Address,N);
-  If Result then
-    SaveNetEntry(@N);
-end;
-
-Function TNetResolver.NameLookup (Const S : String) : Boolean;
-
-Var
-  N : TNetworkEntry;
-
-begin
-  Result:=Inherited NameLookup(S);
-  If Result then
-    begin
-    //Result:=GetNetworkByName(S,N);
-    If Result then
-      SaveNetEntry(@N);
-    end;
-end;
-
-Procedure TNetResolver.SaveNetEntry(Entry : Pointer);
-
-Var
-  PN : ^TNetworkEntry;
-
-begin
-  PN:=ENtry;
-  FName:=PN^.Name;
-  //FNetAddress:=NetToHost(PN^.Addr);
-  //FAliases.CommaText:=PN^.Aliases;
-end;
-
-Function TNetResolver.AddressLookup(Const S : String) : Boolean;
-
-begin
-  Result:=AddressLookup(StrToNetAddr(S));
-end;
-
-
-Function TNetResolver.GetAsString : String;
-
-begin
-  Result:=HostAddrToStr(FNetAddress);
-end;
-
-Function TNetResolver.GetNetAddress : TNetAddr;
-
-begin
-  Result:=HostToNet(FNetAddress);
-end;
-
-
-Procedure TNetResolver.ClearData;
-
-begin
-  Inherited;
-  FNetAddress:=NoAddress;
-  FAddrType:=0;
-end;
-
-{ ---------------------------------------------------------------------
-    TServiceResolver
-  ---------------------------------------------------------------------}
-
-Function TServiceResolver.NameLookup (Const S : String) : Boolean;
-
-begin
-  Result:=NameLookup(S,'');
-end;
-
-Function TServiceResolver.NameLookup (Const S,Proto : String) : Boolean;
-
-Var
-  E : TServiceEntry;
-
-begin
-  ClearData;
-  //Result:=GetServiceByName(S,Proto,E);
-  If Result then
-    SaveServiceEntry(@E);
-end;
-
-Function TServiceResolver.PortLookup (APort: Longint; Proto : String) : Boolean;
-
-Var
-  E : TServiceEntry;
-
-begin
-  ClearData;
-  //Result:=GetServiceByPort(APort,Proto,E);
-  If Result then
-    SaveServiceEntry(@E);
-end;
-
-Procedure TServiceResolver.SaveServiceEntry(Entry : Pointer);
-
-Var
-  PE : ^TServiceEntry;
-
-begin
-  PE:=Entry;
-  FName:=PE^.Name;
-  FPort:=PE^.Port;
-  FProtocol:=PE^.Protocol;
-  //FAliases.CommaText:=PE^.Aliases;
-end;
-
-Procedure TServiceResolver.ClearData;
-
-begin
-  Inherited;
-  FProtocol:='';
-  FPort:=0;
-end;
-
-Function TServiceResolver.GetNetPort : Integer;
-
-begin
-  //Result:=ShortHostToNet(FPort);
-end;
-
-{ ---------------------------------------------------------------------
-    TURIParser
-  ---------------------------------------------------------------------}
-
-
-Procedure TURIParser.SetElement (Index : Integer; Value : String);
-
-begin
- Case index of
-   0  : FProtocol := Value;
-   1  : FUsername := Value;
-   2  : FPassword := Value;
-   3  : FHost     := Value;
-   4  : FPath     := Value;
-   5  : FDocument := Value;
-   6  : FParams   := Value;
-   7  : FBookmark := Value;
-  else
-  end;
-  If FActive and not (csLoading in ComponentState) then
-    FURI:=ComposeURI;
-end;
-
-Function  TURIParser.GetElement(Index : Integer) : String;
-
-begin
-  Case Index of
-  0  : Result := FProtocol;
-  1  : Result := FUsername;
-  2  : Result := FPassword;
-  3  : Result := FHost    ;
-  4  : Result := FPath    ;
-  5  : Result := FDocument;
-  6  : Result := FParams  ;
-  7  : Result := FBookmark;
-  else
-    Result:='';
+    // None found/failures: retry on new server
+    Dec(Attempts);
+    ServerIndex := (ServerIndex + 1) mod DNSServers.Count;
   end;
 end;
 
-Procedure TURIParser.SetPort(Value : Word);
-
-begin
-  FPort:=Value;
-  If FActive and not (csLoading in ComponentState) then
-    FURI:=ComposeURI;
-end;
-
-Procedure TURIParser.SetURI(Value : String);
-
-begin
-  If Active and not (csLoading in ComponentState) then
-    begin
-    Clear;
-    ParseUri(Value);
-    end;
-  FURI:=Value;
-end;
-
-Procedure TURIParser.Clear;
-
-begin
-   FProtocol :='';
-   FUsername :='';
-   FPassword :='';
-   FHost     :='';
-   FPort     :=0;
-   FPath     :='';
-   FDocument :='';
-   FParams   :='';
-   FBookmark :='';
-   FURI      :='';
-end;
-
-Procedure TURIParser.ParseUri(AURI : String);
-
-Var
-  U : TURI;
-
-begin
-  U:=UriParser.ParseURI(AUri);
-  FProtocol := u.Protocol;
-  FUsername := u.Username;
-  FPassword := u.Password;
-  FHost     := u.Host    ;
-  FPort     := u.Port    ;
-  FPath     := u.Path    ;
-  FDocument := u.Document;
-  FParams   := u.Params  ;
-  FBookmark := u.Bookmark;
-end;
-
-
-Function  TURIParser.ComposeURI : String;
-
+procedure TResolveNameTask.Execute;
 var
-  U : TURI;
-
+  Attempts, Timeout: Integer;
+  DNSServers: TStringList;
+  HostNames: TStringArray;
 begin
-  U.Protocol := FProtocol;
-  U.Username := FUsername;
-  U.Password := FPassword;
-  U.Host     := FHost    ;
-  U.Port     := FPort    ;
-  U.Path     := FPath    ;
-  U.Document := FDocument;
-  U.Params   := FParams  ;
-  U.Bookmark := FBookmark;
-  Result:=EncodeUri(U);
+  FResult := Default(TDNSResolveResult);
+  DNSServers := TStringList.Create;
+  try
+    // Retrieving parameter from ResolveDB
+    ResolveDB.BeginAccess;
+    try
+      DNSServers.AddStrings(ResolveDB.DNSServers);
+      Timeout := ResolveDB.DNSTimeOut;
+      Attempts := ResolveDB.Attempts;
+      HostNames := ResolveDB.ResolutionNames[FHostName];
+    finally
+      ResolveDB.EndAccess;
+    end;
+    // First try to resolve from hosts file
+    if ResolveHostsDB(HostNames) then
+      Exit;
+    // If not found resolve using DNS
+    if not ResolveDNS(HostNames, DNSServers, Timeout, Attempts) then
+      raise ENoSuchEntry.Create('Unable resolve ' + FHostName);
+  finally
+    DNSServers.Free;
+  end;
+end;
+
+constructor TResolveNameTask.Create(const AHostName: String;
+  APreferredType: TAddressType);
+begin
+  inherited Create;
+  FHostName := AHostName;
+  FPreferredType := APreferredType;
+end;
+
+constructor TDNSResolveTask.Create(const AHostName: String;
+  const ADNSServer: TNetworkAddress; AddressType: TAddressType;
+  ATimeOut: Integer; ARecursionDepth: Integer);
+begin
+  inherited Create;
+  FHostName := AHostName;
+  FDNSServer := ADNSServer;
+  FAddressType := AddressType;
+  FTimeOut := ATimeOut;
+  FRecursionDepth := ARecursionDepth;
 end;
 
 end.
