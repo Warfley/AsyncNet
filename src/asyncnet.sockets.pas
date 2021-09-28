@@ -566,14 +566,14 @@ var
   Success, err: Integer;
 begin
   repeat
-    Success := fprecv(ASocket, @Success, 0, 0);
+    Success := fpsend(ASocket, @Success, 0, 0);
     if Success < 0 then
     begin
       err := socketerror;
       if err = EsockENOTCONN then
         ATask.Sleep(SocketSleepingTime)
-      else if not WasBlockingError(err) then
-        raise ESocketError.Create(err, 'select');
+      else
+        raise ESocketError.Create(err, 'send');
     end;
   until Success = 0;
 end;
@@ -1024,7 +1024,6 @@ begin
           raise ESocketError.Create(err, 'accept');
       end;
     until not SocketInvalid(Conn);
-    WaitForHandshake(Self, Conn);
   finally
     RestoreBlocking(FServerSocket, OldState);
   end;

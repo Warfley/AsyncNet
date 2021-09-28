@@ -9,7 +9,6 @@ interface
 
 uses
   asyncnet.compatibility, asyncnet.sockets, asyncnet.netdb, asyncnet.resolve, 
-  asyncnet.sslbase, asyncnet.sslsockets, asyncnet.ssockets, 
   asyncnet.dns.resrecords, asyncnet.dns, LazarusPackageIntf;
 
 implementation

@@ -12,7 +12,7 @@
         <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
       </SearchPaths>
     </CompilerOptions>
-    <Files Count="9">
+    <Files Count="6">
       <Item1>
         <Filename Value="src\asyncnet.compatibility.pas"/>
         <UnitName Value="asyncnet.compatibility"/>
@@ -30,25 +30,13 @@
         <UnitName Value="asyncnet.resolve"/>
       </Item4>
       <Item5>
-        <Filename Value="src\asyncnet.sslbase.pas"/>
-        <UnitName Value="asyncnet.sslbase"/>
-      </Item5>
-      <Item6>
-        <Filename Value="src\asyncnet.sslsockets.pas"/>
-        <UnitName Value="asyncnet.sslsockets"/>
-      </Item6>
-      <Item7>
-        <Filename Value="src\asyncnet.ssockets.pas"/>
-        <UnitName Value="asyncnet.ssockets"/>
-      </Item7>
-      <Item8>
         <Filename Value="src\dns\asyncnet.dns.resrecords.pas"/>
         <UnitName Value="asyncnet.dns.resrecords"/>
-      </Item8>
-      <Item9>
+      </Item5>
+      <Item6>
         <Filename Value="src\dns\asyncnet.dns.pas"/>
         <UnitName Value="asyncnet.dns"/>
-      </Item9>
+      </Item6>
     </Files>
     <RequiredPkgs Count="2">
       <Item1>
