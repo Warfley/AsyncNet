@@ -247,7 +247,11 @@ procedure TCPServerListen(AServerSocket: TSocket; Backlog: Integer); inline;
 // Address Management
 function IN4Address(const Address: String): TNetworkAddress; inline;
 function IN6Address(const Address: String): TNetworkAddress; inline;
+function IN4MappedIN6Address(const In4Address: String): TNetworkAddress; inline;
 function INAddr(const Address: String): TNetworkAddress; inline;
+
+function IsIPv4Mapped(const IPv6Addr: TNetworkAddress): Boolean; inline;
+function ExtractIPv4Address(const IPv6Addr: TNetworkAddress): TNetworkAddress; inline;
 
 function IN6Equal(const A, B: String): Boolean;
 operator =(const A, B: TNetworkAddress): Boolean; inline;
@@ -256,8 +260,6 @@ operator :=(const AStr: String): TNetworkAddress; inline;
 // Internal helper
 // Because generics can't reference static functions we publish them here
 // please don't use them directly ;
-function IsIPv4Mapped(const IPv6Addr: TIn6Addr): Boolean; inline;
-function ExtractIPv4Address(const IPv6Addr: TIn6Addr): TNetworkAddress; inline;
 procedure FillAddr(const AAddress: TNetworkAddress; APort: Integer; Addr: PAddressUnion); inline;
 procedure ReadAddr(Addr: PAddressUnion; out AAddress: TNetworkAddress; out APort: Integer);
 function WaitingRecvFrom(AExecution: TExecutable; ASocket: TSocket; Buffer: Pointer;
@@ -463,6 +465,15 @@ begin
  Result.AddressType := atIN6;
 end;
 
+function IN4MappedIN6Address(const In4Address: String): TNetworkAddress;
+var
+  InAddr: TIn_addr;
+begin
+  InAddr := StrToNetAddr(In4Address);
+  Result := IN6Address('::FFFF:%x:%x'.Format([(InAddr.s_bytes[1] shl 8) or InAddr.s_bytes[2],
+                                              (InAddr.s_bytes[3] shl 8) or InAddr.s_bytes[4]]));
+end;
+
 function INAddr(const Address: String): TNetworkAddress;
 begin
  Result := Default(TNetworkAddress);
@@ -471,6 +482,38 @@ begin
   else
     Result.AddressType := atIN6;
   Result.Address := Address;
+end;
+
+function IsIPv4Mapped(const IPv6Addr: TNetworkAddress): Boolean;
+var
+  In6Addr: TIn6Addr;
+begin
+  if IPv6Addr.AddressType = atIN4 then
+    Exit(True);
+  if IPv6Addr.AddressType  <> atIN6 then
+    raise EUnsupportedAddress.Create('Can only check IPv4 mapping for IPv6 addresses');
+  IN6Addr := StrToHostAddr6(IPv6Addr.Address);
+  Result := (IN6Addr.u6_addr16[0] = 0) and
+            (IN6Addr.u6_addr16[1] = 0) and
+            (IN6Addr.u6_addr16[2] = 0) and
+            (IN6Addr.u6_addr16[3] = 0) and
+            (IN6Addr.u6_addr16[4] = 0) and
+            (IN6Addr.u6_addr16[5] = $FFFF);
+end;
+
+function ExtractIPv4Address(const IPv6Addr: TNetworkAddress): TNetworkAddress;
+var
+  In6Addr: TIn6Addr;
+begin
+  if IPv6Addr.AddressType = atIN4 then
+    Exit(IPv6Addr);
+  if IPv6Addr.AddressType  <> atIN6 then
+    raise EUnsupportedAddress.Create('Can only extract IPv4 mapping from IPv6 addresses');
+  IN6Addr := StrToHostAddr6(IPv6Addr.Address);
+  Result := IN4Address('%d.%d.%d.%d'.Format([IN6Addr.s6_addr8[12],
+                                             IN6Addr.s6_addr8[13],
+                                             IN6Addr.s6_addr8[14],
+                                             IN6Addr.s6_addr8[15]]));
 end;
 
 function IN6Equal(const A, B: String): Boolean;
@@ -502,24 +545,6 @@ end;
 
 {$Region Send/Receive Helper}
 
-function IsIPv4Mapped(const IPv6Addr: TIn6Addr): Boolean;
-begin
-  Result := (IPv6Addr.u6_addr16[0] = 0) and
-            (IPv6Addr.u6_addr16[1] = 0) and
-            (IPv6Addr.u6_addr16[2] = 0) and
-            (IPv6Addr.u6_addr16[3] = 0) and
-            (IPv6Addr.u6_addr16[4] = 0) and
-            (IPv6Addr.u6_addr16[5] = $FFFF);
-end;
-
-function ExtractIPv4Address(const IPv6Addr: TIn6Addr): TNetworkAddress;
-begin
-  Result := IN4Address('%d.%d.%d.%d'.Format([IPv6Addr.s6_addr8[12],
-                                             IPv6Addr.s6_addr8[13],
-                                             IPv6Addr.s6_addr8[14],
-                                             IPv6Addr.s6_addr8[15]]));
-end;
-
 procedure FillAddr(const AAddress: TNetworkAddress; APort: Integer; Addr: PAddressUnion);
 begin
   if AAddress.AddressType = atIN4 then
@@ -550,10 +575,7 @@ begin
   end
   else if Addr^.In6Addr.sin6_family = AF_INET6 then
   begin
-    if IsIPv4Mapped(Addr^.In6Addr.sin6_addr) then
-      AAddress := ExtractIPv4Address(Addr^.In6Addr.sin6_addr)
-    else
-      AAddress := IN6Address(HostAddrToStr6(Addr^.In6Addr.sin6_addr));
+    AAddress := IN6Address(HostAddrToStr6(Addr^.In6Addr.sin6_addr));
     APort := NToHs(Addr^.In6Addr.sin6_port);
   end
   else

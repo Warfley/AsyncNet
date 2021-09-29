@@ -17,7 +17,12 @@ begin
     TCPServerListen(ServerSock, 10);
     Conn := specialize Await<TAcceptResult>(AsyncAccept(ServerSock));
     try
-      WriteLn('Server: Connection from ', Conn.PeerAddress.Address, ':', Conn.PeerPort);
+      Write('Server: Connection from ');
+      if IsIPv4Mapped(Conn.PeerAddress.Address) then
+        Write(ExtractIPv4Address(Conn.PeerAddress).Address)
+      else
+        Write(Conn.PeerAddress.Address);
+      WriteLn(':', Conn.PeerPort);
       Data := specialize Await<String>(AsyncReceiveStr(Conn.Connection, 1024, False));
       WriteLn('Server: received ', Data);
       Await(AsyncSendStr(Conn.Connection, 'Hello Client'));
@@ -35,9 +40,10 @@ var
   Data: String;
 begin
   AsyncSleep(100); // wait for server to start
-  Sock := TCPSocket(atIN4);
+  Sock := TCPSocket(atIN6);
   try
-    Await(AsyncConnect(Sock, '127.0.0.1', 1337));
+    // As IN6 uses dual stack we can connect to an IPv4 address
+    Await(AsyncConnect(Sock, IN4MappedIN6Address('127.0.0.1'), 1337));
     WriteLn('Client: Connection established');
     Await(AsyncSendStr(Sock, 'Hello Server'));
     Data := specialize Await<String>(AsyncReceiveStr(Sock, 1024, False));
