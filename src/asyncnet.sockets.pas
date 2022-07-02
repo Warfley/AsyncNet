@@ -241,6 +241,7 @@ function AsyncSendToStr(ASocket: Tsocket; const AAddress: TNetworkAddress; APort
 // Socket API helper
 function TCPSocket(AddressType: TAddressType): TSocket; inline;
 function UDPSocket(AddressType: TAddressType): TSocket; inline;
+function UDPServerSocket(const AAddress: TNetworkAddress; APort: Integer): TSocket;
 function TCPServerSocket(const AAddress: TNetworkAddress; APort: Integer): TSocket;
 procedure TCPServerListen(AServerSocket: TSocket; Backlog: Integer); inline;
 
@@ -428,6 +429,17 @@ begin
   v6Only := 0;
   if AddressType = atIN6 then
     fpsetsockopt(Result, IPPROTO_IP, IPV6_V6ONLY, @v6Only, SizeOf(v6Only));
+end;
+
+function UDPServerSocket(const AAddress: TNetworkAddress; APort: Integer
+  ): TSocket;
+var
+  addr: TAddressUnion;
+begin
+  Result := UDPSocket(AAddress.AddressType);
+  FillAddr(AAddress, APort, @addr);
+  if fpbind(Result, @addr, SizeOf(addr)) <> 0 then raise
+    ESocketError.Create(socketerror, 'bind (%s:%d)'.Format([AAddress.Address, APort]));
 end;
 
 function TCPServerSocket(const AAddress: TNetworkAddress; APort: Integer
