@@ -411,7 +411,7 @@ begin
   // On IPv6 try to use dual stack
   v6Only := 0;
   if AddressType = atIN6 then
-    fpsetsockopt(Result, IPPROTO_IP, IPV6_V6ONLY, @v6Only, SizeOf(v6Only));
+    fpsetsockopt(Result, IPPROTO_IPV6, IPV6_V6ONLY, @v6Only, SizeOf(v6Only));
 end;
 
 function UDPSocket(AddressType: TAddressType): TSocket;
@@ -428,7 +428,7 @@ begin
   // On IPv6 try to use dual stack
   v6Only := 0;
   if AddressType = atIN6 then
-    fpsetsockopt(Result, IPPROTO_IP, IPV6_V6ONLY, @v6Only, SizeOf(v6Only));
+    fpsetsockopt(Result, IPPROTO_IPV6, IPV6_V6ONLY, @v6Only, SizeOf(v6Only));
 end;
 
 function UDPServerSocket(const AAddress: TNetworkAddress; APort: Integer

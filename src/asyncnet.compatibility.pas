@@ -8,7 +8,7 @@ uses
   SysUtils, Sockets {$IfDef Windows}, WinSock2{$Else}, BaseUnix{$EndIf};
 
 const
-  IPPROTO_IP = {$IfDef WINDOWS}41{$Else}41{$EndIf};
+  IPPROTO_IPV6 = {$IfDef WINDOWS}41{$Else}41{$EndIf};
   IPV6_V6ONLY = {$IfDef WINDOWS}27{$Else}26{$EndIf};
 
 type
