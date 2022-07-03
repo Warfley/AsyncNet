@@ -1,6 +1,7 @@
 unit asyncnet.compatibility;
 
 {$mode objfpc}{$H+}
+{$TypedAddress ON}
 
 interface
 

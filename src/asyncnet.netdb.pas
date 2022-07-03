@@ -15,6 +15,7 @@
 {$mode objfpc}
 {$h+}
 {$ModeSwitch arrayoperators}
+{$TypedAddress on}
 
 unit asyncnet.netdb;
 

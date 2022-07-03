@@ -1,6 +1,7 @@
 unit asyncnet.sockets;
 
 {$mode objfpc}{$H+}
+{$TypedAddress on}
 
 interface
 
@@ -264,11 +265,11 @@ operator :=(const AStr: String): TNetworkAddress; inline;
 procedure FillAddr(const AAddress: TNetworkAddress; APort: Integer; Addr: PAddressUnion); inline;
 procedure ReadAddr(Addr: PAddressUnion; out AAddress: TNetworkAddress; out APort: Integer);
 function WaitingRecvFrom(AExecution: TExecutable; ASocket: TSocket; Buffer: Pointer;
-                         BuffLen: SizeInt; Flags: Integer; Address: Pointer;
-                         AddressLen: Pointer): SizeInt;
+                         BuffLen: SizeInt; Flags: Integer; Address: psockaddr;
+                         AddressLen: psocklen): SizeInt;
 function WaitingSendTo(AExecution: TExecutable; ASocket: TSocket; Buffer: Pointer;
-                       BuffLen: SizeInt; Flags: Integer; Address: Pointer;
-                       AddressLen: SizeInt): SizeInt;
+                       BuffLen: SizeInt; Flags: Integer; Address: psockaddr;
+                       AddressLen: tsocklen): SizeInt;
 
 implementation
 
@@ -438,7 +439,7 @@ var
 begin
   Result := UDPSocket(AAddress.AddressType);
   FillAddr(AAddress, APort, @addr);
-  if fpbind(Result, @addr, SizeOf(addr)) <> 0 then raise
+  if fpbind(Result, psockaddr(@addr), SizeOf(addr)) <> 0 then raise
     ESocketError.Create(socketerror, 'bind (%s:%d)'.Format([AAddress.Address, APort]));
 end;
 
@@ -449,7 +450,7 @@ var
 begin
   Result := TCPSocket(AAddress.AddressType);
   FillAddr(AAddress, APort, @addr);
-  if fpbind(Result, @addr, SizeOf(addr)) <> 0 then raise
+  if fpbind(Result, psockaddr(@addr), SizeOf(addr)) <> 0 then raise
     ESocketError.Create(socketerror, 'bind (%s:%d)'.Format([AAddress.Address, APort]));
 end;
 
@@ -634,8 +635,8 @@ end;
 {$EndIf}
 
 function WaitingRecvFrom(AExecution: TExecutable; ASocket: TSocket;
-  Buffer: Pointer; BuffLen: SizeInt; Flags: Integer; Address: Pointer;
-  AddressLen: Pointer): SizeInt;
+  Buffer: Pointer; BuffLen: SizeInt; Flags: Integer; Address: psockaddr;
+  AddressLen: psocklen): SizeInt;
 var
   OldState, err: LongInt;
 begin
@@ -658,8 +659,8 @@ begin
 end;
 
 function WaitingSendTo(AExecution: TExecutable; ASocket: TSocket;
-  Buffer: Pointer; BuffLen: SizeInt; Flags: Integer; Address: Pointer;
-  AddressLen: SizeInt): SizeInt;
+  Buffer: Pointer; BuffLen: SizeInt; Flags: Integer; Address: psockaddr;
+  AddressLen: tsocklen): SizeInt;
 var
   OldState, err: LongInt;
 begin
@@ -690,7 +691,7 @@ var
   addr: TAddressUnion;
 begin
   FillAddr(FAddress, FPort, @addr);
-  FResult := WaitingSendTo(Self, FSocket, @FData, SizeOf(T), 0, @addr, SizeOf(addr));
+  FResult := WaitingSendTo(Self, FSocket, @FData, SizeOf(T), 0, psockaddr(@addr), SizeOf(addr));
 end;
 
 constructor TUDPSendTask.Create(ASocket: TSocket; const AAddress: TNetworkAddress;
@@ -710,7 +711,7 @@ var
   addr: TAddressUnion;
 begin
   FillAddr(FAddress, FPort, @addr);
-  FResult := WaitingSendTo(Self, FSocket, PChar(FData), Length(FData), 0, @addr, SizeOf(addr));
+  FResult := WaitingSendTo(Self, FSocket, PChar(FData), Length(FData), 0, psockaddr(@addr), SizeOf(addr));
 end;
 
 constructor TUDPStringSendTask.Create(ASocket: TSocket; const AAddress: TNetworkAddress;
@@ -730,7 +731,7 @@ var
   addr: TAddressUnion;
 begin
   FillAddr(FAddress, FPort, @addr);
-  FResult := WaitingSendTo(Self, FSocket, @FData[0], Length(FData) * SizeOf(T), 0, @addr, SizeOf(addr));
+  FResult := WaitingSendTo(Self, FSocket, @FData[0], Length(FData) * SizeOf(T), 0, psockaddr(@addr), SizeOf(addr));
 end;
 
 constructor TUDPArraySendTask.Create(ASocket: TSocket; const AAddress: TNetworkAddress;
@@ -750,7 +751,7 @@ var
   addr: TAddressUnion;
 begin
   FillAddr(FAddress, FPort, @addr);
-  FResult := WaitingSendTo(Self, FSocket, FBuffer, FCount, 0, @addr, SizeOf(addr));
+  FResult := WaitingSendTo(Self, FSocket, FBuffer, FCount, 0, psockaddr(@addr), SizeOf(addr));
 end;
 
 constructor TUDPBufferSendTask.Create(ASocket: TSocket; const AAddress: TNetworkAddress;
@@ -768,35 +769,16 @@ end;
 
 procedure TUDPReceiveTask.Execute;
 var
-  {$IfNDef WINDOWS}
-  _addr: TAddressUnion;
-  _addrLen: SizeInt;
-  {$EndIf}
-  addr: PAddressUnion;
-  addrLen: PSizeInt;
+  addr: TAddressUnion;
+  addrLen: tsocklen;
   dataLen: SizeInt;
 begin
-inherited Execute;
-  {$IfDef WINDOWS}
-  // WinSock doesn't like the addr located on the stack, therefore we create a heap instance for it
-  New(addr);
-  New(addrLen);
-  try
-  {$Else}
-  addr := @_addr;
-  addrLen := @_addrLen;
-  {$EndIf}
-  addrLen^ := SizeOf(TAddressUnion);
-  dataLen := WaitingRecvFrom(Self, FSocket, @FResult.Data, SizeOf(T), 0, addr, addrLen);
-  ReadAddr(addr, FResult.Address, FResult.Port);
+  inherited Execute;
+  addrLen := SizeOf(TAddressUnion);
+  dataLen := WaitingRecvFrom(Self, FSocket, @FResult.Data, SizeOf(T), 0, psockaddr(@addr), @addrLen);
+  ReadAddr(@addr, FResult.Address, FResult.Port);
   if dataLen < SizeOf(T) then
     raise EUDPFragmentationException.Create('Receiving of fragmented data is not supported by typed receive');
-  {$IfDef WINDOWS}
-  finally
-    Dispose(addr);
-    Dispose(addrLen);
-  end;
-  {$EndIf}
 end;
 
 constructor TUDPReceiveTask.Create(ASocket: TSocket);
@@ -809,35 +791,16 @@ end;
 
 procedure TUDPStringReceiveTask.Execute;
 var
-  {$IfNDef WINDOWS}
-  _addr: TAddressUnion;
-  _addrLen: SizeInt;
-  {$EndIf}
-  addr: PAddressUnion;
-  addrLen: PSizeInt;
+  addr: TAddressUnion;
+  addrLen: tsocklen;
   dataLen: SizeInt;
 begin
   inherited Execute;
-  {$IfDef WINDOWS}
-  // WinSock doesn't like the addr located on the stack, therefore we create a heap instance for it
-  New(addr);
-  New(addrLen);
-  try
-  {$Else}
-  addr := @_addr; 
-  addrLen := @_addrLen;
-  {$EndIf}
   SetLength(FResult.Data, FMaxLength);
-  addrLen^ := SizeOf(TAddressUnion);
-  dataLen := WaitingRecvFrom(Self, FSocket, PChar(FResult.Data), FMaxLength, 0, addr, addrLen);
+  addrLen := SizeOf(TAddressUnion);
+  dataLen := WaitingRecvFrom(Self, FSocket, PChar(FResult.Data), FMaxLength, 0, psockaddr(@addr), @addrLen);
   SetLength(FResult.Data, dataLen);
-  ReadAddr(addr, FResult.Address, FResult.Port);;
-  {$IfDef WINDOWS}
-  finally
-    Dispose(addr);
-    Dispose(addrLen);
-  end;
-  {$EndIf}
+  ReadAddr(@addr, FResult.Address, FResult.Port);
 end;
 
 constructor TUDPStringReceiveTask.Create(ASocket: TSocket; AMaxLength: SizeInt);
@@ -852,37 +815,18 @@ end;
 
 procedure TUDPArrayReceiveTask.Execute;
 var
-  {$IfNDef WINDOWS}
-  _addr: TAddressUnion;
-  _addrLen: SizeInt;
-  {$EndIf}
-  addr: PAddressUnion;
-  addrLen: PSizeInt;
+  addr: TAddressUnion;
+  addrLen: tsocklen;
   dataLen: SizeInt;
 begin
   inherited Execute;
-  {$IfDef WINDOWS}
-  // WinSock doesn't like the addr located on the stack, therefore we create a heap instance for it
-  New(addr);
-  New(addrLen);
-  try
-  {$Else}
-  addr := @_addr;
-  addrLen := @_addrLen;
-  {$EndIf}
   SetLength(FResult.Data, FMaxCount);
-  addrLen^ := SizeOf(TAddressUnion);
-  dataLen := WaitingRecvFrom(Self, FSocket, @FResult.Data[0], FMaxCount * SizeOf(T), 0, addr, addrLen);
+  addrLen := SizeOf(TAddressUnion);
+  dataLen := WaitingRecvFrom(Self, FSocket, @FResult.Data[0], FMaxCount * SizeOf(T), 0, psockaddr(@addr), @addrLen);
   SetLength(FResult.Data, dataLen div SizeOf(T));
-  ReadAddr(addr, FResult.Address, FResult.Port);
+  ReadAddr(@addr, FResult.Address, FResult.Port);
   if dataLen mod SizeOf(T) > 0 then
     raise EUDPFragmentationException.Create('Receiving of fragmented data is not supported by typed receive');
-  {$IfDef WINDOWS}
-  finally
-    Dispose(addr);
-    Dispose(addrLen);
-  end;
-  {$EndIf}
 end;
 
 constructor TUDPArrayReceiveTask.Create(ASocket: TSocket; AMaxCount: SizeInt);
@@ -896,32 +840,13 @@ end;
 
 procedure TUDPBufferReceiveTask.Execute;
 var
-  {$IfNDef WINDOWS}
-  _addr: TAddressUnion;
-  _addrLen: SizeInt;
-  {$EndIf}
-  addr: PAddressUnion;
-  addrLen: PSizeInt;
+  addr: TAddressUnion;
+  addrLen: tsocklen;
 begin
   inherited Execute;
-  {$IfDef WINDOWS}
-  // WinSock doesn't like the addr located on the stack, therefore we create a heap instance for it
-  New(addr);
-  New(addrLen);
-  try
-  {$Else}
-  addr := @_addr;
-  addrLen := @_addrLen;
-  {$EndIf}
-  addrLen^ := SizeOf(TAddressUnion);
-  FResult.Size := WaitingRecvFrom(Self, FSocket, FBuffer, FBufferLen, 0, addr, addrLen);
-  ReadAddr(addr, FResult.Address, FResult.Port);
-  {$IfDef WINDOWS}
-  finally
-    Dispose(addr);
-    Dispose(addrLen);
-  end;
-  {$EndIf}
+  addrLen := SizeOf(TAddressUnion);
+  FResult.Size := WaitingRecvFrom(Self, FSocket, FBuffer, FBufferLen, 0, psockaddr(@addr), @addrLen);
+  ReadAddr(@addr, FResult.Address, FResult.Port);
 end;
 
 constructor TUDPBufferReceiveTask.Create(ASocket: TSocket; ABuffer: Pointer;
@@ -1011,7 +936,7 @@ begin
   OldState := SetNonBlocking(FSocket);
   try
     FillAddr(FAddress, FPort, @addr);
-    success := fpconnect(FSocket, @addr, SizeOf(addr));
+    success := fpconnect(FSocket, psockaddr(@addr), SizeOf(addr));
     if success <> 0 then
     begin
       err := socketerror;
@@ -1041,14 +966,14 @@ var
   OldState, err: LongInt;
   Conn: TSocket;
   addr: TAddressUnion;
-  addrLen: SizeInt;
+  addrLen: tsocklen;
 begin
   inherited Execute;
   addrLen := SizeOf(addr);
   OldState := SetNonBlocking(FServerSocket);
   try
     repeat
-      Conn := fpaccept(FServerSocket, @addr, @addrLen);
+      Conn := fpaccept(FServerSocket, psockaddr(@addr), @addrLen);
       if SocketInvalid(Conn) then
       begin
         err := socketerror;

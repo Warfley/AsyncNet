@@ -1,7 +1,8 @@
 unit asyncnet.resolve;
 
 {$Mode ObjFpc}
-{$H+}
+{$H+}      
+{$TypedAddress ON}
 
 interface
 

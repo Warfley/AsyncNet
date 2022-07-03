@@ -62,7 +62,7 @@ begin
   try
     WriteLn('Hosts:');
     for h in HostsDB.Hosts do
-      WriteLn('  ', h.Name, ': ', h.Addr.Address);
+      WriteLn('  ', h.Name, ': ', h.Addresses[0].Address);
   finally
     HostsDB.EndAccess;
   end;

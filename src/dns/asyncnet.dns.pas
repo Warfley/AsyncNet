@@ -2,7 +2,8 @@ unit asyncnet.dns;
 
 {$mode objfpc}{$H+}
 {$ModeSwitch arrayoperators}
-{$ModeSwitch advancedrecords}
+{$ModeSwitch advancedrecords} 
+{$TypedAddress ON}
 
 interface
 

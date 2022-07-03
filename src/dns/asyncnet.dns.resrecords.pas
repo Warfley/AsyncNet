@@ -2,7 +2,8 @@ unit asyncnet.dns.resrecords;
 // DNS implementation according to RFC 1035
 // See: https://datatracker.ietf.org/doc/html/rfc1035
 
-{$mode objfpc}{$H+}
+{$mode objfpc}{$H+} 
+{$TypedAddress ON}
 
 interface
 
@@ -357,7 +358,7 @@ begin
   // Also outputs the first byte after the name which is where the header starts
   Result.Name := ReadDomainName(Result.RRStartPtr, MessageStart,
                              MessageEnd - SizeOf(TResourceRecordHeader),
-                             @HeaderPtr);
+                             @Pointer(HeaderPtr));
   if Pointer(HeaderPtr) + SizeOf(TResourceRecordHeader) > MessageEnd then
     raise EMalformedResRecord.Create('Resource record does not fit message');
   // Read the header fields
